@@ -66,13 +66,29 @@ def get_accounts():
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM accounts ORDER BY timestamp DESC LIMIT 50")
-        accounts = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
-        
+
+        accounts = [
+            {
+                "id": row[0],
+                "account_number": row[1],
+                "balance": row[2],
+                "equity": row[3],
+                "margin_used": row[4],
+                "free_margin": row[5],
+                "margin_level": row[6],
+                "open_trades": row[7],
+                "timestamp": row[8]
+            }
+            for row in rows
+        ]
+
         return jsonify({"accounts": accounts}), 200
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))  # Print error logs
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))  # Read PORT from environment
