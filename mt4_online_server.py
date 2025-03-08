@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from flask import Flask, request, jsonify
 
@@ -8,6 +9,7 @@ db_file = os.path.join(os.path.dirname(__file__), "mt4_data.db")
 print("[DEBUG] Database file location:", db_file)
 
 def initialize_database():
+    print("[DEBUG] Initializing database...")
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute('''
@@ -25,8 +27,9 @@ def initialize_database():
     ''')
     conn.commit()
     conn.close()
+    print("[DEBUG] Database initialized successfully.")
 
-initialize_database()  # Ensure database exists at startup
+initialize_database()
 
 @app.before_request
 def log_request_info():
@@ -34,19 +37,17 @@ def log_request_info():
     print("Method:", request.method)
     print("Path:", request.path)
     print("Headers:", request.headers)
-    print("Body:", request.data.decode("utf-8"))  # Print raw request body
+    print("Body:", request.data.decode("utf-8"))
 
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # Log full request data
         raw_data = request.data.decode("utf-8")
         print("[DEBUG] Raw Request Data:", raw_data)
 
-        # Ensure it's valid JSON
         try:
-            data = request.get_json(force=True)
-        except Exception as e:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError as e:
             print("[ERROR] Failed to parse JSON:", str(e))
             return jsonify({"error": "Invalid JSON format"}), 400
 
@@ -89,6 +90,7 @@ def receive_mt4_data():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
+
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -117,7 +119,6 @@ def get_accounts():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
