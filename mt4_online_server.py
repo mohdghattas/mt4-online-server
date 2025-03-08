@@ -30,7 +30,8 @@ if not os.path.exists(db_file):
 def receive_mt4_data():
     try:
         data = request.json
-        print("[DEBUG] Received data:", data)
+        print("[DEBUG] Received raw data:", request.data.decode("utf-8"))  # Print raw JSON
+        print("[DEBUG] Parsed JSON:", data)  # Print parsed JSON
 
         account_number = data.get("account_number")
         balance = data.get("balance")
@@ -45,20 +46,17 @@ def receive_mt4_data():
 
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
-        
-        # Check if the account already exists
+
         cursor.execute("SELECT id FROM accounts WHERE account_number = ?", (account_number,))
         existing = cursor.fetchone()
 
         if existing:
-            # Update existing account record
             cursor.execute('''
                 UPDATE accounts
                 SET balance = ?, equity = ?, margin_used = ?, free_margin = ?, margin_level = ?, open_trades = ?, timestamp = CURRENT_TIMESTAMP
                 WHERE account_number = ?
             ''', (balance, equity, margin_used, free_margin, margin_level, open_trades, account_number))
         else:
-            # Insert new record
             cursor.execute('''
                 INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -71,6 +69,7 @@ def receive_mt4_data():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/api/accounts", methods=["GET"])
