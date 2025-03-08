@@ -74,5 +74,5 @@ def get_accounts():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))  # Read PORT from environment
-    print("[DEBUG] Database file location:", os.path.abspath(db_file))  # Debug database location
+    print("[DEBUG] Starting Flask on port:", port)
     app.run(host="0.0.0.0", port=port)
