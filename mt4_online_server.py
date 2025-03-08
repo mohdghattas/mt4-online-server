@@ -26,12 +26,17 @@ if not os.path.exists(db_file):
     conn.commit()
     conn.close()
 
+@app.before_request
+def log_request_info():
+    print("[DEBUG] Received HTTP Request:")
+    print("Headers:", request.headers)
+    print("Body:", request.data.decode("utf-8"))  # Print raw request body
+
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         data = request.json
-        print("[DEBUG] Received raw data:", request.data.decode("utf-8"))  # Print raw JSON
-        print("[DEBUG] Parsed JSON:", data)  # Print parsed JSON
+        print("[DEBUG] Parsed JSON:", data)
 
         account_number = data.get("account_number")
         balance = data.get("balance")
@@ -69,6 +74,7 @@ def receive_mt4_data():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 
 
