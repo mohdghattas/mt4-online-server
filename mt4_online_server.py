@@ -1,3 +1,4 @@
+print("[DEBUG] Database file location:", os.path.abspath(db_file))
 from flask import Flask, request, jsonify
 import sqlite3
 import os
