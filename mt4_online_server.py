@@ -43,12 +43,12 @@ def log_request_info():
 def receive_mt4_data():
     try:
         # Log raw request data
-        raw_data = request.data.decode("utf-8")
+        raw_data = request.data.decode("utf-8", errors="ignore").strip()
         print("[DEBUG] Raw Request Data:", raw_data)
 
-        # Ensure valid JSON
+        # Ensure valid JSON by stripping potential null characters
         try:
-            data = json.loads(raw_data)  # Use json.loads() for strict decoding
+            data = json.loads(raw_data)
         except json.JSONDecodeError as e:
             print("[ERROR] JSON Parsing Failed:", str(e))
             return jsonify({"error": "Invalid JSON format"}), 400
