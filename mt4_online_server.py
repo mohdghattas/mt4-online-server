@@ -42,17 +42,20 @@ def log_request_info():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
+        # Log raw request data
         raw_data = request.data.decode("utf-8")
         print("[DEBUG] Raw Request Data:", raw_data)
 
+        # Ensure valid JSON
         try:
-            data = json.loads(raw_data)
+            data = json.loads(raw_data)  # Use json.loads() for strict decoding
         except json.JSONDecodeError as e:
-            print("[ERROR] Failed to parse JSON:", str(e))
+            print("[ERROR] JSON Parsing Failed:", str(e))
             return jsonify({"error": "Invalid JSON format"}), 400
 
         print("[DEBUG] Parsed JSON:", data)
 
+        # Extract data
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
@@ -90,6 +93,7 @@ def receive_mt4_data():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
