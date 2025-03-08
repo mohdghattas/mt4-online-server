@@ -28,7 +28,8 @@ if not os.path.exists(db_file):
 def receive_mt4_data():
     try:
         data = request.json
-        
+        print("[DEBUG] Received data:", data)  # Log incoming data
+
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
@@ -36,10 +37,10 @@ def receive_mt4_data():
         free_margin = data.get("free_margin")
         margin_level = data.get("margin_level")
         open_trades = data.get("open_trades")
-        
+
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
-        
+
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute('''
@@ -51,7 +52,9 @@ def receive_mt4_data():
 
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
+        print("[ERROR]", str(e))  # Log errors
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
