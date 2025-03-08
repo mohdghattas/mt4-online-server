@@ -1,28 +1,28 @@
 import os
 import json
-import sqlite3
+import psycopg2
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-db_file = os.path.join(os.path.dirname(__file__), "mt4_data.db")
-print("[DEBUG] Database file location:", db_file)
+# Use PostgreSQL from Railway
+DATABASE_URL = "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway"
 
 def initialize_database():
-    print("[DEBUG] Initializing database...")
-    conn = sqlite3.connect(db_file)
+    print("[DEBUG] Initializing PostgreSQL database...")
+    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            account_number INTEGER UNIQUE,
-            balance REAL,
-            equity REAL,
-            margin_used REAL,
-            free_margin REAL,
-            margin_level REAL,
-            open_trades INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            account_number BIGINT UNIQUE,
+            balance FLOAT,
+            equity FLOAT,
+            margin_used FLOAT,
+            free_margin FLOAT,
+            margin_level FLOAT,
+            open_trades INT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -31,23 +31,14 @@ def initialize_database():
 
 initialize_database()
 
-@app.before_request
-def log_request_info():
-    print("[DEBUG] Received HTTP Request:")
-    print("Method:", request.method)
-    print("Path:", request.path)
-    print("Headers:", request.headers)
-    print("Body:", request.data.decode("utf-8"))
-
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # Log raw request data
         raw_data = request.data.decode("utf-8", errors="ignore").strip()
         print("[DEBUG] Raw Request Data:", raw_data)
 
-        # Ensure valid JSON by stripping potential null characters
         try:
+            raw_data = raw_data.split("\x00")[0]
             data = json.loads(raw_data)
         except json.JSONDecodeError as e:
             print("[ERROR] JSON Parsing Failed:", str(e))
@@ -55,7 +46,6 @@ def receive_mt4_data():
 
         print("[DEBUG] Parsed JSON:", data)
 
-        # Extract data
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
@@ -68,22 +58,22 @@ def receive_mt4_data():
             print("[ERROR] Missing account_number")
             return jsonify({"error": "Missing account_number"}), 400
 
-        conn = sqlite3.connect(db_file)
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
 
-        cursor.execute("SELECT id FROM accounts WHERE account_number = ?", (account_number,))
+        cursor.execute("SELECT id FROM accounts WHERE account_number = %s", (account_number,))
         existing = cursor.fetchone()
 
         if existing:
             cursor.execute('''
                 UPDATE accounts
-                SET balance = ?, equity = ?, margin_used = ?, free_margin = ?, margin_level = ?, open_trades = ?, timestamp = CURRENT_TIMESTAMP
-                WHERE account_number = ?
+                SET balance = %s, equity = %s, margin_used = %s, free_margin = %s, margin_level = %s, open_trades = %s, timestamp = CURRENT_TIMESTAMP
+                WHERE account_number = %s
             ''', (balance, equity, margin_used, free_margin, margin_level, open_trades, account_number))
         else:
             cursor.execute('''
                 INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             ''', (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades))
 
         conn.commit()
@@ -94,28 +84,21 @@ def receive_mt4_data():
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         print("[DEBUG] Fetching account data from database...")
 
-        # Connect to database
-        conn = sqlite3.connect(db_file)
+        conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        
-        # Fetch last 50 accounts
         cursor.execute("SELECT * FROM accounts ORDER BY timestamp DESC LIMIT 50")
         rows = cursor.fetchall()
-
         conn.close()
 
-        # If no accounts exist, return empty response
         if not rows:
             print("[DEBUG] No account data found.")
             return jsonify({"accounts": []}), 200
 
-        # Format response
         accounts = [
             {
                 "id": row[0],
@@ -133,11 +116,9 @@ def get_accounts():
 
         print("[DEBUG] Returning account data:", accounts)
         return jsonify({"accounts": accounts}), 200
-
     except Exception as e:
         print("[ERROR] Exception occurred while fetching accounts:", str(e))
         return jsonify({"error": "Failed to fetch account data"}), 500
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
