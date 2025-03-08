@@ -98,12 +98,24 @@ def receive_mt4_data():
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
+        print("[DEBUG] Fetching account data from database...")
+
+        # Connect to database
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
+        
+        # Fetch last 50 accounts
         cursor.execute("SELECT * FROM accounts ORDER BY timestamp DESC LIMIT 50")
         rows = cursor.fetchall()
+
         conn.close()
 
+        # If no accounts exist, return empty response
+        if not rows:
+            print("[DEBUG] No account data found.")
+            return jsonify({"accounts": []}), 200
+
+        # Format response
         accounts = [
             {
                 "id": row[0],
@@ -119,10 +131,13 @@ def get_accounts():
             for row in rows
         ]
 
+        print("[DEBUG] Returning account data:", accounts)
         return jsonify({"accounts": accounts}), 200
+
     except Exception as e:
-        print("[ERROR] Exception occurred:", str(e))
-        return jsonify({"error": str(e)}), 500
+        print("[ERROR] Exception occurred while fetching accounts:", str(e))
+        return jsonify({"error": "Failed to fetch account data"}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
