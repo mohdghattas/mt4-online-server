@@ -73,3 +73,12 @@ def get_accounts():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
+@app.route("/api/debug", methods=["GET"])
+def debug_db():
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM accounts")
+    rows = cursor.fetchall()
+    conn.close()
+    return jsonify({"debug_data": rows})
