@@ -4,7 +4,9 @@ import sqlite3
 
 app = Flask(__name__)
 
-db_file = "mt4_data.db"
+db_file = os.path.join(os.path.dirname(__file__), "mt4_data.db")
+print("[DEBUG] Database file location:", db_file)
+
 if not os.path.exists(db_file):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
