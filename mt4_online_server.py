@@ -1,7 +1,6 @@
-print("[DEBUG] Database file location:", os.path.abspath(db_file))
+import os
 from flask import Flask, request, jsonify
 import sqlite3
-import os
 
 app = Flask(__name__)
 
@@ -29,7 +28,10 @@ if not os.path.exists(db_file):
 def receive_mt4_data():
     try:
         data = request.json
-        print("[DEBUG] Received data:", data)  # Log incoming data
+        print("[DEBUG] Received data:", data)  # Print received data
+
+        if not data:
+            return jsonify({"error": "No data received"}), 400
 
         account_number = data.get("account_number")
         balance = data.get("balance")
@@ -53,9 +55,8 @@ def receive_mt4_data():
 
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
-        print("[ERROR]", str(e))  # Log errors
+        print("[ERROR] Exception occurred:", str(e))  # Print error logs
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
@@ -68,17 +69,10 @@ def get_accounts():
         
         return jsonify({"accounts": accounts}), 200
     except Exception as e:
+        print("[ERROR] Exception occurred:", str(e))  # Print error logs
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5000))  # Read PORT from environment
+    print("[DEBUG] Database file location:", os.path.abspath(db_file))  # Debug database location
     app.run(host="0.0.0.0", port=port)
-
-@app.route("/api/debug", methods=["GET"])
-def debug_db():
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM accounts")
-    rows = cursor.fetchall()
-    conn.close()
-    return jsonify({"debug_data": rows})
