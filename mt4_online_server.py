@@ -3,9 +3,10 @@ from flask_cors import CORS
 import psycopg2
 import os
 from datetime import datetime
+import pytz
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes to allow the dashboard to fetch data
+CORS(app)  # Enable CORS for all routes
 
 # PostgreSQL Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
@@ -66,8 +67,16 @@ def get_accounts():
         cur.close()
         conn.close()
 
-        accounts_list = [
-            {
+        # Convert timestamps to Lebanon Time (EET/EEST) and format as AM/PM
+        lebanon_tz = pytz.timezone("Asia/Beirut")
+
+        accounts_list = []
+        for row in accounts:
+            utc_timestamp = row[8].replace(tzinfo=pytz.utc)  # Ensure timestamp is UTC
+            lebanon_time = utc_timestamp.astimezone(lebanon_tz)  # Convert to Lebanon Time
+            formatted_time = lebanon_time.strftime("%I:%M:%S %p")  # Format as AM/PM
+            
+            accounts_list.append({
                 "id": row[0],
                 "account_number": row[1],
                 "balance": row[2],
@@ -76,9 +85,8 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": row[8].strftime("%a, %d %b %Y %H:%M:%S GMT")
-            } for row in accounts
-        ]
+                "timestamp": formatted_time
+            })
         
         return jsonify({"accounts": accounts_list}), 200
     
