@@ -39,7 +39,17 @@ def log_request_info():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        data = request.json
+        # Log full request data
+        raw_data = request.data.decode("utf-8")
+        print("[DEBUG] Raw Request Data:", raw_data)
+
+        # Ensure it's valid JSON
+        try:
+            data = request.get_json(force=True)
+        except Exception as e:
+            print("[ERROR] Failed to parse JSON:", str(e))
+            return jsonify({"error": "Invalid JSON format"}), 400
+
         print("[DEBUG] Parsed JSON:", data)
 
         account_number = data.get("account_number")
@@ -79,6 +89,7 @@ def receive_mt4_data():
     except Exception as e:
         print("[ERROR] Exception occurred:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
