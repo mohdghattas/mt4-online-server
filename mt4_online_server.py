@@ -1,15 +1,15 @@
+import os
+import psycopg2
+import pytz
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import psycopg2
-import os
-from datetime import datetime
-import pytz
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# PostgreSQL Database Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
+# ✅ Use Railway's PostgreSQL database URL
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -20,7 +20,7 @@ def receive_mt4_data():
         data = request.get_json()
         if not data:
             return jsonify({"error": "Invalid JSON payload"}), 400
-        
+
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
@@ -28,16 +28,15 @@ def receive_mt4_data():
         free_margin = data.get("free_margin")
         margin_level = data.get("margin_level")
         open_trades = data.get("open_trades")
-        
-        # Standardize timestamp to UTC
-        timestamp = datetime.now(pytz.utc)  # Use UTC time
-        
+
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
-        
+
+        # ✅ Store timestamps in UTC
+        timestamp = datetime.now(pytz.utc)  # Always store in UTC
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
         sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -48,52 +47,16 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = EXCLUDED.timestamp;  -- Use the inserted UTC timestamp
+                timestamp = EXCLUDED.timestamp;
         """
-        
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
         cur.close()
         conn.close()
-        
-        print(f"[DEBUG] Data stored with updated UTC timestamp: {timestamp}")
-        
+
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
-        
-        # Convert stored UTC timestamp to Lebanon time
-        lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = [
-            {
-                "id": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "margin_used": row[4],
-                "free_margin": row[5],
-                "margin_level": row[6],
-                "open_trades": row[7],
-                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-            }
-            for row in accounts
-        ]
-        
-        print(f"[DEBUG] Returning updated account data: {accounts_list}")
-        
-        return jsonify({"accounts": accounts_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+def get_accounts
