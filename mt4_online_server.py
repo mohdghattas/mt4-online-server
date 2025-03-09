@@ -33,7 +33,7 @@ def receive_mt4_data():
             return jsonify({"error": "Missing account_number"}), 400
 
         # ✅ Store timestamps in UTC
-        timestamp = datetime.utcnow()  # Store in UTC
+        timestamp = datetime.utcnow()  # Always store in UTC
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -48,7 +48,7 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW();  -- ✅ Ensure update uses server time
+                timestamp = NOW();  -- ✅ Ensures updates also use the correct timestamp
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
@@ -70,10 +70,23 @@ def get_accounts():
         cur.close()
         conn.close()
 
-        # Convert timestamps to Lebanon Time (EET/EEST)
+        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
         lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = [
-            {
+
+        accounts_list = []
+        for row in accounts:
+            timestamp_str = str(row[8])
+
+            # ✅ Handle missing microseconds issue
+            try:
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")  # Format with microseconds
+            except ValueError:
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")  # Fallback without microseconds
+
+            # ✅ Convert to Lebanon Time
+            timestamp = timestamp.replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+
+            accounts_list.append({
                 "id": row[0],
                 "account_number": row[1],
                 "balance": row[2],
@@ -82,13 +95,8 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f")
-                .replace(tzinfo=pytz.utc)
-                .astimezone(lebanon_tz)
-                .strftime("%I:%M:%S %p"),  # ✅ Converts to Lebanon Time AM/PM format
-            }
-            for row in accounts
-        ]
+                "timestamp": timestamp
+            })
 
         return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
