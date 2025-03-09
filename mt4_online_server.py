@@ -38,8 +38,8 @@ def receive_mt4_data():
         
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
+        
+        sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
@@ -49,15 +49,15 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = EXCLUDED.timestamp;
-            """,
-            (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-        )
+                timestamp = NOW();
+        """
+        
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
         cur.close()
         conn.close()
         
-        print(f"[DEBUG] Received and stored data: {data}")
+        print(f"[DEBUG] Data stored with updated timestamp: {timestamp}")
         
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
@@ -90,7 +90,7 @@ def get_accounts():
             for row in accounts
         ]
         
-        print(f"[DEBUG] Returning account data: {accounts_list}")
+        print(f"[DEBUG] Returning updated account data: {accounts_list}")
         
         return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
