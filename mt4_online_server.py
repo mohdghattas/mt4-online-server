@@ -33,7 +33,7 @@ def receive_mt4_data():
             return jsonify({"error": "Missing account_number"}), 400
 
         # ✅ Store timestamps in UTC
-        timestamp = datetime.utcnow()  # Always store in UTC
+        timestamp = datetime.utcnow()
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -48,7 +48,7 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW();  -- ✅ Ensures updates also use the correct timestamp
+                timestamp = NOW();  -- ✅ Force timestamp to update correctly
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
