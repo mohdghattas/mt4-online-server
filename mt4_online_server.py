@@ -29,9 +29,8 @@ def receive_mt4_data():
         margin_level = data.get("margin_level")
         open_trades = data.get("open_trades")
         
-        # Get current time in Lebanon timezone
-        lebanon_tz = pytz.timezone("Asia/Beirut")
-        timestamp = datetime.now(pytz.utc).astimezone(lebanon_tz)
+        # Standardize timestamp to UTC
+        timestamp_utc = datetime.utcnow()
         
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
@@ -49,15 +48,15 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW();
+                timestamp = EXCLUDED.timestamp;
         """
         
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp_utc))
         conn.commit()
         cur.close()
         conn.close()
         
-        print(f"[DEBUG] Data stored with updated timestamp: {timestamp}")
+        print(f"[DEBUG] Data stored with updated UTC timestamp: {timestamp_utc}")
         
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
