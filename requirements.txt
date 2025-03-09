@@ -1,4 +1,5 @@
 flask
-flask_cors
-psycopg2
 gunicorn
+psycopg2
+flask_cors
+pytz  # ✅ Add this line
