@@ -30,7 +30,7 @@ def receive_mt4_data():
         open_trades = data.get("open_trades")
         
         # Standardize timestamp to UTC
-        timestamp_utc = datetime.utcnow()
+        timestamp = datetime.now(pytz.utc)  # Use UTC time
         
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
@@ -48,15 +48,15 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = EXCLUDED.timestamp;
+                timestamp = EXCLUDED.timestamp;  -- Use the inserted UTC timestamp
         """
         
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp_utc))
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
         cur.close()
         conn.close()
         
-        print(f"[DEBUG] Data stored with updated UTC timestamp: {timestamp_utc}")
+        print(f"[DEBUG] Data stored with updated UTC timestamp: {timestamp}")
         
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
@@ -72,7 +72,7 @@ def get_accounts():
         cur.close()
         conn.close()
         
-        # Convert timestamps to Lebanon Time (EET/EEST) and format as AM/PM
+        # Convert stored UTC timestamp to Lebanon time
         lebanon_tz = pytz.timezone("Asia/Beirut")
         accounts_list = [
             {
@@ -84,7 +84,7 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
             }
             for row in accounts
         ]
