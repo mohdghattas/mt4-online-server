@@ -118,7 +118,11 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f")
+                "try:
+    timestamp = datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f")
+except ValueError:
+    timestamp = datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S")  # Fallback if milliseconds are missing
+)
                 .replace(tzinfo=pytz.utc)
                 .astimezone(lebanon_tz)
                 .strftime("%I:%M:%S %p")
