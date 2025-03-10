@@ -45,8 +45,12 @@ def receive_mt4_data():
         # ✅ Store timestamps in UTC
         timestamp = datetime.now(pytz.utc)
 
+        # ✅ Print debug logs for tracking
+        print(f"[DEBUG] Incoming Data: {data}")
+
         conn = get_db_connection()
         cur = conn.cursor()
+
         sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -59,49 +63,22 @@ def receive_mt4_data():
                 open_trades = EXCLUDED.open_trades,
                 timestamp = EXCLUDED.timestamp;
         """
+        
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
 
-        # ✅ Send alert if equity is too low
-        if equity < balance * 0.2:
-            send_telegram_alert(f"⚠ WARNING: Account {account_number} equity is critically low! ({equity})")
+        # ✅ Print confirmation that data was saved
+        print(f"[DEBUG] Data updated successfully for Account: {account_number}")
 
         cur.close()
         conn.close()
+
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
+        print(f"[ERROR] Database Update Failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
-        lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = [
-            {
-                "id": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "margin_used": row[4],
-                "free_margin": row[5],
-                "margin_level": row[6],
-                "open_trades": row[7],
-                "timestamp": row[8].replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-            }
-            for row in accounts
-        ]
-        return jsonify({"accounts": accounts_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
