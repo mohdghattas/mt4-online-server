@@ -1,110 +1,118 @@
 import os
 import psycopg2
 import pytz
-import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ✅ Initialize Flask App
+# Flask App Setup
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# ✅ Configure Logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+# ✅ Use Railway PostgreSQL database
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
-# ✅ PostgreSQL Database Connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
-
+# Database Connection
 def get_db_connection():
-    """ Creates a fresh connection to PostgreSQL database """
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = True  # ✅ Ensures all changes are saved instantly
-        return conn
-    except Exception as e:
-        logging.error(f"Database connection failed: {e}")
-        return None
+    return psycopg2.connect(DATABASE_URL)
 
-# ✅ Route to Receive MT4 Data
+# ✅ Cleanup Function: Remove Stale Accounts (No Updates for 30 Days)
+def remove_stale_accounts(days=30):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        cur.execute("DELETE FROM accounts WHERE last_update < %s RETURNING account_number;", (cutoff,))
+        removed = cur.fetchall()
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if removed:
+            print(f"[INFO] Removed stale accounts: {[row[0] for row in removed]}")
+        return len(removed)
+    except Exception as e:
+        print(f"[ERROR] Failed to remove stale accounts: {e}")
+        return 0
+
+# ✅ POST: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        data = request.get_json()
-        
-        # ✅ Log Incoming Data for Debugging
-        logging.debug(f"Received Payload: {data}")
+        raw_data = request.get_data(as_text=True)
+        print(f"[DEBUG] Incoming Raw Payload: {raw_data}")
 
+        # Ensure the request contains JSON
+        if request.content_type != "application/json":
+            return jsonify({"error": "Invalid content type, expecting application/json"}), 400
+
+        # Parse JSON Payload
+        data = request.get_json()
         if not data:
             return jsonify({"error": "Invalid JSON payload"}), 400
+        
+        # Extract Fields
+        account_number = data.get("account_number")
+        balance = data.get("balance")
+        equity = data.get("equity")
+        margin_used = data.get("margin_used")
+        free_margin = data.get("free_margin")
+        margin_level = data.get("margin_level")
+        open_trades = data.get("open_trades")
 
-        # ✅ Extract Data (Handling Edge Cases)
-        try:
-            account_number = data["account_number"]
-            balance = data["balance"]
-            equity = data["equity"]
-            margin_used = data["margin_used"]
-            free_margin = data["free_margin"]
-            margin_level = data["margin_level"]
-            open_trades = data["open_trades"]
-        except KeyError as e:
-            return jsonify({"error": f"Missing key: {str(e)}"}), 400
+        # Validate Required Fields
+        required_keys = {"account_number", "balance", "equity", "margin_used", "free_margin", "margin_level", "open_trades"}
+        if not required_keys.issubset(data.keys()):
+            print("[ERROR] Missing required fields in payload")
+            return jsonify({"error": "Malformed payload, missing required fields"}), 400
 
-        if not account_number:
-            return jsonify({"error": "Missing account_number"}), 400
+        # ✅ Store timestamps in UTC
+        timestamp = datetime.utcnow()
 
         conn = get_db_connection()
-        if conn is None:
-            return jsonify({"error": "Database connection failed"}), 500
-
         cur = conn.cursor()
-        
-        # ✅ Insert or Update Data
+
+        # ✅ Insert or Update Account Data
         sql_query = """
-            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, last_update)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity,
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
-                open_trades = EXCLUDED.open_trades;
+                open_trades = EXCLUDED.open_trades,
+                last_update = EXCLUDED.last_update;
         """
-
-        # ✅ Execute & Log SQL Query
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades))
-        logging.debug(f"SQL Executed: {sql_query}")
-        logging.debug(f"Rows Affected: {cur.rowcount}")
-
-        conn.commit()  # ✅ Ensure transaction is saved
-        
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        conn.commit()
         cur.close()
         conn.close()
 
+        print(f"[INFO] Account {account_number} updated successfully.")
+
+        # ✅ Remove old inactive accounts
+        remove_stale_accounts(days=30)
+
         return jsonify({"message": "Data stored successfully"}), 200
-    except psycopg2.DatabaseError as e:
-        logging.error(f"Database error: {e}")
-        return jsonify({"error": str(e)}), 500
+
     except Exception as e:
-        logging.error(f"Error in /api/mt4data: {str(e)}")
+        print(f"[ERROR] Error in /api/mt4data: {e}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ Route to Get Account Data (Dashboard)
+# ✅ GET: Fetch Accounts for Dashboard
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         conn = get_db_connection()
-        if conn is None:
-            return jsonify({"error": "Database connection failed"}), 500
-
         cur = conn.cursor()
-        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts")
+        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts ORDER BY last_update DESC")
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
-        # ✅ Format Data for API Response
+        # Convert to JSON Response
         accounts_list = [
             {
                 "account_number": row[0],
@@ -113,13 +121,15 @@ def get_accounts():
                 "margin_used": row[3],
                 "free_margin": row[4],
                 "margin_level": row[5],
-                "open_trades": row[6]
+                "open_trades": row[6],
             }
             for row in accounts
         ]
+
         return jsonify({"accounts": accounts_list}), 200
+
     except Exception as e:
-        logging.error(f"Error in /api/accounts: {str(e)}")
+        print(f"[ERROR] Error in /api/accounts: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
