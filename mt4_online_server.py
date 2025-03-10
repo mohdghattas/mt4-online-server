@@ -17,7 +17,12 @@ logging.basicConfig(level=logging.DEBUG)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except psycopg2.Error as db_error:
+        logging.error(f"❌ Database Connection Error: {str(db_error)}")
+        return None
 
 # ✅ Route: Receive MT4 Data
 @app.route("/api/mt4data", methods=["POST"])
@@ -25,28 +30,36 @@ def receive_mt4_data():
     try:
         data = request.get_json()
         if not data:
-            logging.error("Received empty JSON payload.")
+            logging.error("❌ Received empty JSON payload.")
             return jsonify({"error": "Invalid JSON payload"}), 400
 
         # ✅ Log the incoming payload
-        logging.debug(f"Incoming Payload: {json.dumps(data, indent=2)}")
+        logging.debug(f"📥 Incoming Payload: {json.dumps(data, indent=2)}")
 
-        account_number = data.get("account_number")
-        balance = float(data.get("balance", 0.0))
-        equity = float(data.get("equity", 0.0))
-        margin_used = float(data.get("margin_used", 0.0))
-        free_margin = float(data.get("free_margin", 0.0))
-        margin_level = float(data.get("margin_level", 0.0))
-        open_trades = int(data.get("open_trades", 0))
+        # ✅ Extract and validate fields
+        try:
+            account_number = int(data.get("account_number"))
+            balance = float(data.get("balance", 0.0))
+            equity = float(data.get("equity", 0.0))
+            margin_used = float(data.get("margin_used", 0.0))
+            free_margin = float(data.get("free_margin", 0.0))
+            margin_level = float(data.get("margin_level", 0.0))
+            open_trades = int(data.get("open_trades", 0))
+        except ValueError as e:
+            logging.error(f"❌ Data Type Error: {str(e)}")
+            return jsonify({"error": "Invalid data format"}), 400
 
         if not account_number:
-            logging.error("Missing account_number field.")
+            logging.error("❌ Missing account_number field.")
             return jsonify({"error": "Missing account_number"}), 400
 
         # ✅ Store timestamps in UTC
         timestamp = datetime.utcnow()
 
         conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+
         cur = conn.cursor()
 
         sql_query = """
@@ -74,11 +87,11 @@ def receive_mt4_data():
         return jsonify({"message": "Data stored successfully"}), 200
 
     except psycopg2.Error as db_error:
-        logging.error(f"❌ Database Error: {str(db_error)}")
+        logging.error(f"❌ SQL Execution Error: {str(db_error)}")
         return jsonify({"error": "Database Error", "details": str(db_error)}), 500
 
     except Exception as e:
-        logging.error(f"❌ API error: {str(e)}")
+        logging.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # ✅ Route: Retrieve Account Data
@@ -86,6 +99,9 @@ def receive_mt4_data():
 def get_accounts():
     try:
         conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+
         cur = conn.cursor()
         cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts ORDER BY last_update DESC")
         accounts = cur.fetchall()
