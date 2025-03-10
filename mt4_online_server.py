@@ -12,11 +12,38 @@ CORS(app)  # Enable CORS for all routes
 # ✅ Use Railway PostgreSQL database
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
-# Database Connection
+# ✅ Database Connection Function
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ✅ Cleanup Function: Remove Stale Accounts (No Updates for 30 Days)
+# ✅ Auto-Fix Missing Column: Adds last_update if not found
+def ensure_last_update_column():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Check if last_update column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name='accounts' AND column_name='last_update';
+        """)
+        exists = cur.fetchone()
+
+        if not exists:
+            print("[INFO] Adding missing last_update column to accounts table...")
+            cur.execute("ALTER TABLE accounts ADD COLUMN last_update TIMESTAMP DEFAULT NOW();")
+            conn.commit()
+            print("[SUCCESS] last_update column added successfully.")
+
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] Failed to modify accounts table: {e}")
+
+# ✅ Call to Fix DB Schema Before Running API
+ensure_last_update_column()
+
+# ✅ Remove Old Accounts (Inactive for 30 Days)
 def remove_stale_accounts(days=30):
     try:
         conn = get_db_connection()
@@ -27,7 +54,7 @@ def remove_stale_accounts(days=30):
         conn.commit()
         cur.close()
         conn.close()
-        
+
         if removed:
             print(f"[INFO] Removed stale accounts: {[row[0] for row in removed]}")
         return len(removed)
@@ -50,7 +77,7 @@ def receive_mt4_data():
         data = request.get_json()
         if not data:
             return jsonify({"error": "Invalid JSON payload"}), 400
-        
+
         # Extract Fields
         account_number = data.get("account_number")
         balance = data.get("balance")
