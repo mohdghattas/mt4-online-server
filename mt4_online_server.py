@@ -1,6 +1,7 @@
 import os
 import psycopg2
 import pytz
+import requests
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -8,7 +9,10 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+# ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
+TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"  # Replace with actual Telegram Chat ID
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -31,6 +35,7 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
+        # ✅ Store timestamps in UTC for consistency
         timestamp = datetime.now(pytz.utc)
 
         conn = get_db_connection()
@@ -47,17 +52,54 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW() -- ✅ Force update timestamp
+                timestamp = NOW()
             WHERE accounts.open_trades <> EXCLUDED.open_trades
                OR accounts.equity <> EXCLUDED.equity
                OR accounts.margin_used <> EXCLUDED.margin_used;
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
+
+        # ✅ Log historical data
+        cur.execute("""
+            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+
+        conn.commit()
         cur.close()
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/accounts", methods=["GET"])
+def get_accounts():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
+        accounts = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        lebanon_tz = pytz.timezone("Asia/Beirut")
+        accounts_list = [
+            {
+                "id": row[0],
+                "account_number": row[1],
+                "balance": row[2],
+                "equity": row[3],
+                "margin_used": row[4],
+                "free_margin": row[5],
+                "margin_level": row[6],
+                "open_trades": row[7],
+                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+            }
+            for row in accounts
+        ]
+        return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
