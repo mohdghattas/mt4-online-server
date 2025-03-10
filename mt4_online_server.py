@@ -6,28 +6,17 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# ✅ Secure API Key (Replace with your own)
-API_KEY = os.getenv("API_KEY", "your-secure-api-key")  # Set a secure API key
-
-# ✅ PostgreSQL Database URL
+# ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
+# ✅ Function to establish a database connection
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ✅ Middleware to enforce API authentication
-def require_api_key(func):
-    def wrapper(*args, **kwargs):
-        api_key = request.headers.get("X-API-Key")
-        if not api_key or api_key != API_KEY:
-            return jsonify({"error": "Unauthorized"}), 403  # Forbidden access
-        return func(*args, **kwargs)
-    return wrapper
-
+# ✅ Route: Receive data from MT4 and store it in PostgreSQL
 @app.route("/api/mt4data", methods=["POST"])
-@require_api_key  # 🔒 Protect this route
 def receive_mt4_data():
     try:
         data = request.get_json()
@@ -45,7 +34,8 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        timestamp = datetime.utcnow()  # Store timestamp in UTC
+        # ✅ Store timestamps in UTC (consistent with DB)
+        timestamp = datetime.now(pytz.utc)
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -60,7 +50,7 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW();
+                timestamp = EXCLUDED.timestamp;
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
@@ -68,34 +58,25 @@ def receive_mt4_data():
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ Route: Fetch all account data
 @app.route("/api/accounts", methods=["GET"])
-@require_api_key  # 🔒 Protect this route
 def get_accounts():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
+        # ✅ Convert stored UTC timestamps to Lebanon Time (EET/EEST) & format as AM/PM
         lebanon_tz = pytz.timezone("Asia/Beirut")
-
-        accounts_list = []
-        for row in accounts:
-            timestamp_str = str(row[8])
-            try:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-            except ValueError:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-
-            timestamp = timestamp.replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-
-            accounts_list.append({
+        accounts_list = [
+            {
                 "id": row[0],
                 "account_number": row[1],
                 "balance": row[2],
@@ -104,12 +85,17 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": timestamp
-            })
+                "timestamp": row[8].replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                if isinstance(row[8], datetime) else str(row[8])
+            }
+            for row in accounts
+        ]
 
         return jsonify({"accounts": accounts_list}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ✅ Start the Flask app
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
