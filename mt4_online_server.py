@@ -1,21 +1,28 @@
 import os
 import psycopg2
 import pytz
-import requests
+import requests  # Required for Telegram notifications
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# ✅ Use Railway's PostgreSQL database URL
+# ✅ Use Railway PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
+
+# ✅ Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"  # Replace with your actual Telegram chat ID
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+    requests.post(url, json=payload)
 
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
@@ -40,8 +47,6 @@ def receive_mt4_data():
 
         conn = get_db_connection()
         cur = conn.cursor()
-
-        # ✅ Ensure API updates on new trades or changes
         sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -52,25 +57,19 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW()
-            WHERE accounts.open_trades <> EXCLUDED.open_trades
-               OR accounts.equity <> EXCLUDED.equity
-               OR accounts.margin_used <> EXCLUDED.margin_used;
+                timestamp = EXCLUDED.timestamp;
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
 
-        # ✅ Log historical data
-        cur.execute("""
-            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        # ✅ Send alert if equity is too low
+        if equity < balance * 0.2:
+            send_telegram_alert(f"⚠ WARNING: Account {account_number} equity is critically low! ({equity})")
 
-        conn.commit()
         cur.close()
         conn.close()
-
         return jsonify({"message": "Data stored successfully"}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -84,22 +83,10 @@ def get_accounts():
         cur.close()
         conn.close()
 
+        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
         lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = []
-
-        for row in accounts:
-            timestamp = row[8]  # Database timestamp
-            try:
-                # ✅ Try parsing with microseconds
-                parsed_timestamp = datetime.strptime(str(timestamp), "%Y-%m-%d %H:%M:%S.%f")
-            except ValueError:
-                # ✅ Fallback to second-level precision (no microseconds)
-                parsed_timestamp = datetime.strptime(str(timestamp), "%Y-%m-%d %H:%M:%S")
-
-            # ✅ Convert to Lebanon time
-            formatted_time = parsed_timestamp.replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-
-            accounts_list.append({
+        accounts_list = [
+            {
                 "id": row[0],
                 "account_number": row[1],
                 "balance": row[2],
@@ -108,9 +95,10 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": formatted_time
-            })
-
+                "timestamp": row[8].replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+            }
+            for row in accounts
+        ]
         return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
