@@ -13,8 +13,8 @@ CORS(app)  # Enable CORS for all routes
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 # ✅ Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"  # ⚠️ Replace with your new secure token!
-TELEGRAM_CHAT_ID = "Ghattas_Bot"  # ⚠️ Replace with your personal Telegram chat ID
+TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"  
+TELEGRAM_CHAT_ID = "Ghattas_Bot"  
 
 # ✅ Function to Send Telegram Alerts
 def send_telegram_alert(message):
