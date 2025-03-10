@@ -70,6 +70,9 @@ def receive_mt4_data():
         print(f"[ERROR] Database Update Failed: {e}")
         return jsonify({"error": str(e)}), 500
 
+print(f"[DEBUG] Incoming MT4 Data: {data}")
+
+
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -110,3 +113,5 @@ def get_accounts():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
+
