@@ -2,7 +2,6 @@ import os
 import psycopg2
 import json
 import logging
-from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -53,29 +52,31 @@ def receive_mt4_data():
             logging.error("❌ Missing account_number field.")
             return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Store timestamps in UTC
-        timestamp = datetime.utcnow()
-
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
 
         cur = conn.cursor()
 
+        # ✅ DEBUG: Check if account exists before updating
+        cur.execute("SELECT * FROM accounts WHERE account_number = %s", (account_number,))
+        existing_data = cur.fetchone()
+
+        logging.debug(f"🔎 Existing Data for {account_number}: {existing_data}")
+
         sql_query = """
-            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, last_update)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity,
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
-                open_trades = EXCLUDED.open_trades,
-                last_update = EXCLUDED.last_update;
+                open_trades = EXCLUDED.open_trades;
         """
 
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades))
         conn.commit()
 
         # ✅ Log success
@@ -103,7 +104,7 @@ def get_accounts():
             return jsonify({"error": "Database connection failed"}), 500
 
         cur = conn.cursor()
-        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts ORDER BY last_update DESC")
+        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts")
         accounts = cur.fetchall()
         cur.close()
         conn.close()
