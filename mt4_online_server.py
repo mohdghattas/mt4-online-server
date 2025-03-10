@@ -6,13 +6,55 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# ✅ Use Railway's PostgreSQL database
+# ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+def initialize_database():
+    """Ensures the database has the required tables."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # ✅ Create `accounts` table (for latest account state)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id SERIAL PRIMARY KEY,
+            account_number BIGINT UNIQUE NOT NULL,
+            balance FLOAT NOT NULL,
+            equity FLOAT NOT NULL,
+            margin_used FLOAT NOT NULL,
+            free_margin FLOAT NOT NULL,
+            margin_level FLOAT NOT NULL,
+            open_trades INT NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
+    """)
+
+    # ✅ Create `history` table (for tracking historical changes)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id SERIAL PRIMARY KEY,
+            account_number BIGINT NOT NULL,
+            balance FLOAT NOT NULL,
+            equity FLOAT NOT NULL,
+            margin_used FLOAT NOT NULL,
+            free_margin FLOAT NOT NULL,
+            margin_level FLOAT NOT NULL,
+            open_trades INT NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT now()
+        );
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ✅ Run this function when the server starts
+initialize_database()
 
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
@@ -32,19 +74,14 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        timestamp = datetime.now(pytz.utc)  # Store in UTC
+        # ✅ Store timestamps in UTC
+        timestamp = datetime.now(pytz.utc)
 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # ✅ Insert into historical data table
-        cur.execute("""
-            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
-
-        # ✅ Update latest account details (overwrite)
-        cur.execute("""
+        # ✅ Insert or update latest account state
+        sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
@@ -55,6 +92,13 @@ def receive_mt4_data():
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
                 timestamp = EXCLUDED.timestamp;
+        """
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+
+        # ✅ Insert historical data
+        cur.execute("""
+            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
         """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
 
         conn.commit()
@@ -62,6 +106,36 @@ def receive_mt4_data():
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/accounts", methods=["GET"])
+def get_accounts():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
+        accounts = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        # ✅ Convert timestamps to Lebanon Time (EET/EEST) and format as AM/PM
+        lebanon_tz = pytz.timezone("Asia/Beirut")
+        accounts_list = [
+            {
+                "id": row[0],
+                "account_number": row[1],
+                "balance": row[2],
+                "equity": row[3],
+                "margin_used": row[4],
+                "free_margin": row[5],
+                "margin_level": row[6],
+                "open_trades": row[7],
+                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+            }
+            for row in accounts
+        ]
+        return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -75,6 +149,7 @@ def get_history():
         cur.close()
         conn.close()
 
+        # ✅ Convert timestamps to Lebanon Time (EET/EEST) and format as AM/PM
         lebanon_tz = pytz.timezone("Asia/Beirut")
         history_list = [
             {
@@ -89,7 +164,6 @@ def get_history():
             }
             for row in history
         ]
-
         return jsonify({"history": history_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
