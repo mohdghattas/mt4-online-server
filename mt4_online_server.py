@@ -1,5 +1,6 @@
 import os
 import psycopg2
+import requests
 import pytz
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -8,45 +9,26 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# ✅ Use Railway's PostgreSQL database URL
+# ✅ Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
+# ✅ Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"  # ⚠️ Replace with your new secure token!
+TELEGRAM_CHAT_ID = "Ghattas_Bot"  # ⚠️ Replace with your personal Telegram chat ID
+
+# ✅ Function to Send Telegram Alerts
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+    response = requests.post(url, json=payload)
+    return response.json()
+
+# ✅ Database Connection
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
-
-# ✅ Ensure tables exist on startup
-def initialize_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS accounts (
-            id SERIAL PRIMARY KEY,
-            account_number BIGINT UNIQUE,
-            balance FLOAT,
-            equity FLOAT,
-            margin_used FLOAT,
-            free_margin FLOAT,
-            margin_level FLOAT,
-            open_trades INT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id SERIAL PRIMARY KEY,
-            account_number BIGINT,
-            balance FLOAT,
-            equity FLOAT,
-            margin_used FLOAT,
-            free_margin FLOAT,
-            margin_level FLOAT,
-            open_trades INT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
 
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
@@ -67,13 +49,11 @@ def receive_mt4_data():
             return jsonify({"error": "Missing account_number"}), 400
 
         # ✅ Store timestamps in UTC
-        timestamp = datetime.now(pytz.utc)  
+        timestamp = datetime.now(pytz.utc)
 
         conn = get_db_connection()
         cur = conn.cursor()
-
-        # ✅ Ensure proper SQL formatting
-        cur.execute("""
+        sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
@@ -84,15 +64,31 @@ def receive_mt4_data():
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
                 timestamp = EXCLUDED.timestamp;
-        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
-
-        # ✅ Insert historical data
-        cur.execute("""
-            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
-
+        """
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
+
+        # ✅ Check Conditions for Alerts
+        alert_message = None
+        if free_margin < 500:  # Adjust this threshold as needed
+            alert_message = f"⚠️ *Low Free Margin Alert!*\n\n" \
+                            f"📊 Account: {account_number}\n" \
+                            f"💰 Balance: {balance}\n" \
+                            f"📉 Free Margin: {free_margin}\n" \
+                            f"⚠️ Action Needed: Check your positions!"
+        
+        elif margin_level < 100:  # Critical margin level threshold
+            alert_message = f"🚨 *Margin Level Critical!*\n\n" \
+                            f"📊 Account: {account_number}\n" \
+                            f"💰 Balance: {balance}\n" \
+                            f"📊 Equity: {equity}\n" \
+                            f"⚠️ Margin Level: {margin_level}%\n" \
+                            f"⚠️ Action Needed: Reduce leverage or add funds!"
+
+        # ✅ Send Alert if Condition Met
+        if alert_message:
+            send_telegram_alert(alert_message)
+
         cur.close()
         conn.close()
 
@@ -110,7 +106,7 @@ def get_accounts():
         cur.close()
         conn.close()
 
-        # ✅ Convert stored UTC timestamp to Lebanon time
+        # Convert timestamps to Lebanon Time (EET/EEST) and format as AM/PM
         lebanon_tz = pytz.timezone("Asia/Beirut")
         accounts_list = [
             {
@@ -122,7 +118,10 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f")
+                .replace(tzinfo=pytz.utc)
+                .astimezone(lebanon_tz)
+                .strftime("%I:%M:%S %p")
             }
             for row in accounts
         ]
@@ -130,36 +129,5 @@ def get_accounts():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/history", methods=["GET"])
-def get_history():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM history ORDER BY timestamp DESC LIMIT 100")
-        history = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        # ✅ Convert stored UTC timestamp to Lebanon time
-        lebanon_tz = pytz.timezone("Asia/Beirut")
-        history_list = [
-            {
-                "id": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "margin_used": row[4],
-                "free_margin": row[5],
-                "margin_level": row[6],
-                "open_trades": row[7],
-                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-            }
-            for row in history
-        ]
-        return jsonify({"history": history_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 if __name__ == "__main__":
-    initialize_db()  # ✅ Ensure tables exist
     app.run(host="0.0.0.0", port=5000)
