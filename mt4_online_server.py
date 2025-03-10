@@ -65,33 +65,32 @@ def receive_mt4_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
+@app.route("/api/history", methods=["GET"])
+def get_history():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
-        accounts = cur.fetchall()
+        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM history ORDER BY timestamp DESC LIMIT 100")
+        history = cur.fetchall()
         cur.close()
         conn.close()
 
         lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = [
+        history_list = [
             {
-                "id": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "margin_used": row[4],
-                "free_margin": row[5],
-                "margin_level": row[6],
-                "open_trades": row[7],
-                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                "account_number": row[0],
+                "balance": row[1],
+                "equity": row[2],
+                "margin_used": row[3],
+                "free_margin": row[4],
+                "margin_level": row[5],
+                "open_trades": row[6],
+                "timestamp": row[7].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
             }
-            for row in accounts
+            for row in history
         ]
 
-        return jsonify({"accounts": accounts_list}), 200
+        return jsonify({"history": history_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
