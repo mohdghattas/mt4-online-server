@@ -44,4 +44,62 @@ def receive_mt4_data():
         sql_query = """
             DELETE FROM accounts WHERE account_number = %s;
             
-            INSERT INTO accounts (
+            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        """
+        
+        cur.execute(sql_query, (account_number, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        conn.commit()
+
+        # ✅ Print confirmation that data was saved
+        print(f"[DEBUG] Data updated successfully for Account: {account_number}")
+
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Data stored successfully"}), 200
+
+    except Exception as e:
+        print(f"[ERROR] Database Update Failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/accounts", methods=["GET"])
+def get_accounts():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
+        accounts = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        # ✅ Print raw data for debugging
+        print(f"[DEBUG] Raw Database Data: {accounts}")
+
+        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
+        lebanon_tz = pytz.timezone("Asia/Beirut")
+        accounts_list = [
+            {
+                "id": row[0],
+                "account_number": row[1],
+                "balance": row[2],
+                "equity": row[3],
+                "margin_used": row[4],
+                "free_margin": row[5],
+                "margin_level": row[6],
+                "open_trades": row[7],
+                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+            }
+            for row in accounts
+        ]
+
+        return jsonify({"accounts": accounts_list}), 200
+
+    except Exception as e:
+        print(f"[ERROR] Database Fetch Failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
