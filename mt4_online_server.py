@@ -1,117 +1,121 @@
 import os
 import psycopg2
 import pytz
+import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+# ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# ✅ Use Railway's PostgreSQL database URL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
+# ✅ Configure Logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# ✅ PostgreSQL Database Connection
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logging.error(f"Database connection failed: {e}")
+        return None
 
+# ✅ Route to Receive MT4 Data
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         data = request.get_json()
+        
+        # ✅ Log Incoming Data for Debugging
+        logging.debug(f"Received Payload: {data}")
+
         if not data:
             return jsonify({"error": "Invalid JSON payload"}), 400
 
-        account_number = data.get("account_number")
-        balance = data.get("balance")
-        equity = data.get("equity")
-        margin_used = data.get("margin_used")
-        free_margin = data.get("free_margin")
-        margin_level = data.get("margin_level")
-        open_trades = data.get("open_trades")
+        # ✅ Extract Data (Handling Edge Cases)
+        try:
+            account_number = data["account_number"]
+            balance = data["balance"]
+            equity = data["equity"]
+            margin_used = data["margin_used"]
+            free_margin = data["free_margin"]
+            margin_level = data["margin_level"]
+            open_trades = data["open_trades"]
+        except KeyError as e:
+            return jsonify({"error": f"Missing key: {str(e)}"}), 400
 
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Store timestamps in UTC
-        timestamp = datetime.now(pytz.utc)
-
-        # ✅ Print debug logs for tracking
-        print(f"[DEBUG] Incoming MT4 Data: {data}")
-
         conn = get_db_connection()
-        cur = conn.cursor()
+        if conn is None:
+            return jsonify({"error": "Database connection failed"}), 500
 
-        # ✅ Ensure Data is Always Up-To-Date
+        cur = conn.cursor()
+        
+        # ✅ Insert or Update Data
         sql_query = """
-            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity,
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
-                open_trades = EXCLUDED.open_trades,
-                timestamp = EXCLUDED.timestamp;
+                open_trades = EXCLUDED.open_trades;
         """
-        
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades))
         conn.commit()
 
-        # ✅ Print confirmation that data was saved
-        print(f"[DEBUG] Data updated for Account: {account_number}")
+        # ✅ Confirm Update
+        logging.debug(f"SQL Executed: {cur.query}")
+        logging.debug(f"Rows Affected: {cur.rowcount}")
 
         cur.close()
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
-
     except Exception as e:
-        print(f"[ERROR] Database Update Failed: {e}")
+        logging.error(f"Error in /api/mt4data: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-
-
+# ✅ Route to Get Account Data (Dashboard)
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         conn = get_db_connection()
+        if conn is None:
+            return jsonify({"error": "Database connection failed"}), 500
+
         cur = conn.cursor()
-
-        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM accounts ORDER BY timestamp DESC")
+        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts")
         accounts = cur.fetchall()
-
         cur.close()
         conn.close()
 
-        # ✅ Print raw data for debugging
-        print(f"[DEBUG] Raw Database Data: {accounts}")
-
-        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
-        lebanon_tz = pytz.timezone("Asia/Beirut")
+        # ✅ Format Data for API Response
         accounts_list = [
             {
-                "id": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "margin_used": row[4],
-                "free_margin": row[5],
-                "margin_level": row[6],
-                "open_trades": row[7],
-                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                "account_number": row[0],
+                "balance": row[1],
+                "equity": row[2],
+                "margin_used": row[3],
+                "free_margin": row[4],
+                "margin_level": row[5],
+                "open_trades": row[6]
             }
             for row in accounts
         ]
-
         return jsonify({"accounts": accounts_list}), 200
-
     except Exception as e:
-        print(f"[ERROR] Database Fetch Failed: {e}")
+        logging.error(f"Error in /api/accounts: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
