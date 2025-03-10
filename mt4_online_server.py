@@ -12,7 +12,7 @@ CORS(app)
 # ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 TELEGRAM_BOT_TOKEN = "7785508845:AAFUKJCZdQ6MUTzkDXrANH-05O_1IjT3kWc"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"  # Replace with actual Telegram Chat ID
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -35,7 +35,7 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Store timestamps in UTC for consistency
+        # ✅ Store timestamps in UTC
         timestamp = datetime.now(pytz.utc)
 
         conn = get_db_connection()
@@ -85,8 +85,21 @@ def get_accounts():
         conn.close()
 
         lebanon_tz = pytz.timezone("Asia/Beirut")
-        accounts_list = [
-            {
+        accounts_list = []
+
+        for row in accounts:
+            timestamp = row[8]  # Database timestamp
+            try:
+                # ✅ Try parsing with microseconds
+                parsed_timestamp = datetime.strptime(str(timestamp), "%Y-%m-%d %H:%M:%S.%f")
+            except ValueError:
+                # ✅ Fallback to second-level precision (no microseconds)
+                parsed_timestamp = datetime.strptime(str(timestamp), "%Y-%m-%d %H:%M:%S")
+
+            # ✅ Convert to Lebanon time
+            formatted_time = parsed_timestamp.replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+
+            accounts_list.append({
                 "id": row[0],
                 "account_number": row[1],
                 "balance": row[2],
@@ -95,10 +108,9 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": datetime.strptime(str(row[8]), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-            }
-            for row in accounts
-        ]
+                "timestamp": formatted_time
+            })
+
         return jsonify({"accounts": accounts_list}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
