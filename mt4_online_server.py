@@ -6,15 +6,28 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# ✅ Use Railway's PostgreSQL database URL
+# ✅ Secure API Key (Replace with your own)
+API_KEY = os.getenv("API_KEY", "your-secure-api-key")  # Set a secure API key
+
+# ✅ PostgreSQL Database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
+# ✅ Middleware to enforce API authentication
+def require_api_key(func):
+    def wrapper(*args, **kwargs):
+        api_key = request.headers.get("X-API-Key")
+        if not api_key or api_key != API_KEY:
+            return jsonify({"error": "Unauthorized"}), 403  # Forbidden access
+        return func(*args, **kwargs)
+    return wrapper
+
 @app.route("/api/mt4data", methods=["POST"])
+@require_api_key  # 🔒 Protect this route
 def receive_mt4_data():
     try:
         data = request.get_json()
@@ -32,8 +45,7 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Store timestamps in UTC
-        timestamp = datetime.utcnow()
+        timestamp = datetime.utcnow()  # Store timestamp in UTC
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -48,7 +60,7 @@ def receive_mt4_data():
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
-                timestamp = NOW();  -- ✅ Force timestamp to update correctly
+                timestamp = NOW();
         """
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
@@ -60,6 +72,7 @@ def receive_mt4_data():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/accounts", methods=["GET"])
+@require_api_key  # 🔒 Protect this route
 def get_accounts():
     try:
         conn = get_db_connection()
@@ -70,20 +83,16 @@ def get_accounts():
         cur.close()
         conn.close()
 
-        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
         lebanon_tz = pytz.timezone("Asia/Beirut")
 
         accounts_list = []
         for row in accounts:
             timestamp_str = str(row[8])
-
-            # ✅ Handle missing microseconds issue
             try:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")  # Format with microseconds
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
             except ValueError:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")  # Fallback without microseconds
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
 
-            # ✅ Convert to Lebanon Time
             timestamp = timestamp.replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
 
             accounts_list.append({
