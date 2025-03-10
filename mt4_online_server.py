@@ -17,8 +17,10 @@ logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
+    """ Creates a fresh connection to PostgreSQL database """
     try:
         conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True  # ✅ Ensures all changes are saved instantly
         return conn
     except Exception as e:
         logging.error(f"Database connection failed: {e}")
@@ -70,17 +72,20 @@ def receive_mt4_data():
                 open_trades = EXCLUDED.open_trades;
         """
 
+        # ✅ Execute & Log SQL Query
         cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades))
-        conn.commit()
-
-        # ✅ Confirm Update
-        logging.debug(f"SQL Executed: {cur.query}")
+        logging.debug(f"SQL Executed: {sql_query}")
         logging.debug(f"Rows Affected: {cur.rowcount}")
 
+        conn.commit()  # ✅ Ensure transaction is saved
+        
         cur.close()
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
+    except psycopg2.DatabaseError as e:
+        logging.error(f"Database error: {e}")
+        return jsonify({"error": str(e)}), 500
     except Exception as e:
         logging.error(f"Error in /api/mt4data: {str(e)}")
         return jsonify({"error": str(e)}), 500
