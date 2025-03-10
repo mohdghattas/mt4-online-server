@@ -6,54 +6,48 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# ✅ PostgreSQL Database Connection
+# ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ✅ Ensure the necessary tables exist before inserting data
-def initialize_database():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                id SERIAL PRIMARY KEY,
-                account_number BIGINT UNIQUE,
-                balance FLOAT,
-                equity FLOAT,
-                margin_used FLOAT,
-                free_margin FLOAT,
-                margin_level FLOAT,
-                open_trades INT,
-                timestamp TIMESTAMPTZ DEFAULT NOW()
-            );
-        ""
-        )
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS history (
-                id SERIAL PRIMARY KEY,
-                account_number BIGINT,
-                balance FLOAT,
-                equity FLOAT,
-                margin_used FLOAT,
-                free_margin FLOAT,
-                margin_level FLOAT,
-                open_trades INT,
-                timestamp TIMESTAMPTZ DEFAULT NOW()
-            );
-        ""
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print("[ERROR] Database Initialization Failed:", str(e))
+# ✅ Ensure tables exist on startup
+def initialize_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id SERIAL PRIMARY KEY,
+            account_number BIGINT UNIQUE,
+            balance FLOAT,
+            equity FLOAT,
+            margin_used FLOAT,
+            free_margin FLOAT,
+            margin_level FLOAT,
+            open_trades INT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id SERIAL PRIMARY KEY,
+            account_number BIGINT,
+            balance FLOAT,
+            equity FLOAT,
+            margin_used FLOAT,
+            free_margin FLOAT,
+            margin_level FLOAT,
+            open_trades INT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
-# ✅ API Route to Receive MT4 Data
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
@@ -72,12 +66,13 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        timestamp = datetime.now(pytz.utc)  # Store in UTC
+        # ✅ Store timestamps in UTC
+        timestamp = datetime.now(pytz.utc)  
 
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # ✅ Update `accounts` table with latest data
+
+        # ✅ Ensure proper SQL formatting
         cur.execute("""
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -91,7 +86,7 @@ def receive_mt4_data():
                 timestamp = EXCLUDED.timestamp;
         """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
 
-        # ✅ Insert data into `history` table for tracking
+        # ✅ Insert historical data
         cur.execute("""
             INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
@@ -105,7 +100,6 @@ def receive_mt4_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ API Route to Get Current Account Data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -115,8 +109,8 @@ def get_accounts():
         accounts = cur.fetchall()
         cur.close()
         conn.close()
-        
-        # ✅ Convert timestamps to Lebanon Time (EET/EEST)
+
+        # ✅ Convert stored UTC timestamp to Lebanon time
         lebanon_tz = pytz.timezone("Asia/Beirut")
         accounts_list = [
             {
@@ -136,28 +130,29 @@ def get_accounts():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ API Route to Get Historical Data
 @app.route("/api/history", methods=["GET"])
 def get_history():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM history ORDER BY timestamp DESC LIMIT 100")
+        cur.execute("SELECT id, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp FROM history ORDER BY timestamp DESC LIMIT 100")
         history = cur.fetchall()
         cur.close()
         conn.close()
-        
+
+        # ✅ Convert stored UTC timestamp to Lebanon time
         lebanon_tz = pytz.timezone("Asia/Beirut")
         history_list = [
             {
-                "account_number": row[0],
-                "balance": row[1],
-                "equity": row[2],
-                "margin_used": row[3],
-                "free_margin": row[4],
-                "margin_level": row[5],
-                "open_trades": row[6],
-                "timestamp": row[7].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
+                "id": row[0],
+                "account_number": row[1],
+                "balance": row[2],
+                "equity": row[3],
+                "margin_used": row[4],
+                "free_margin": row[5],
+                "margin_level": row[6],
+                "open_trades": row[7],
+                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
             }
             for row in history
         ]
@@ -166,5 +161,5 @@ def get_history():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    initialize_database()  # Ensure tables exist before running
+    initialize_db()  # ✅ Ensure tables exist
     app.run(host="0.0.0.0", port=5000)
