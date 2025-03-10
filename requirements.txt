@@ -3,3 +3,5 @@ gunicorn
 psycopg2
 flask_cors
 pytz  # ✅ Add this line
+requests
+
