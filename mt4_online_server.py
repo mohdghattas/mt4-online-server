@@ -36,23 +36,30 @@ def receive_mt4_data():
         timestamp = datetime.now(pytz.utc)
 
         # ✅ Print debug logs for tracking
-        print(f"[DEBUG] Incoming Data: {data}")
+        print(f"[DEBUG] Incoming MT4 Data: {data}")
 
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # ✅ Ensure Data is Always Up-To-Date
         sql_query = """
-            DELETE FROM accounts WHERE account_number = %s;
-            
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (account_number) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                equity = EXCLUDED.equity,
+                margin_used = EXCLUDED.margin_used,
+                free_margin = EXCLUDED.free_margin,
+                margin_level = EXCLUDED.margin_level,
+                open_trades = EXCLUDED.open_trades,
+                timestamp = EXCLUDED.timestamp;
         """
         
-        cur.execute(sql_query, (account_number, account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
         conn.commit()
 
         # ✅ Print confirmation that data was saved
-        print(f"[DEBUG] Data updated successfully for Account: {account_number}")
+        print(f"[DEBUG] Data updated for Account: {account_number}")
 
         cur.close()
         conn.close()
