@@ -6,16 +6,14 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# ✅ Use Railway's PostgreSQL database URL
+# ✅ Use Railway's PostgreSQL database
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
 
-# ✅ Function to establish a database connection
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ✅ Route: Receive data from MT4 and store it in PostgreSQL
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
@@ -34,13 +32,19 @@ def receive_mt4_data():
         if not account_number:
             return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Store timestamps in UTC (consistent with DB)
-        timestamp = datetime.now(pytz.utc)
+        timestamp = datetime.now(pytz.utc)  # Store in UTC
 
         conn = get_db_connection()
         cur = conn.cursor()
 
-        sql_query = """
+        # ✅ Insert into historical data table
+        cur.execute("""
+            INSERT INTO history (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+
+        # ✅ Update latest account details (overwrite)
+        cur.execute("""
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
@@ -51,18 +55,16 @@ def receive_mt4_data():
                 margin_level = EXCLUDED.margin_level,
                 open_trades = EXCLUDED.open_trades,
                 timestamp = EXCLUDED.timestamp;
-        """
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+        """, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
+
         conn.commit()
         cur.close()
         conn.close()
 
         return jsonify({"message": "Data stored successfully"}), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ Route: Fetch all account data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -73,7 +75,6 @@ def get_accounts():
         cur.close()
         conn.close()
 
-        # ✅ Convert stored UTC timestamps to Lebanon Time (EET/EEST) & format as AM/PM
         lebanon_tz = pytz.timezone("Asia/Beirut")
         accounts_list = [
             {
@@ -85,17 +86,14 @@ def get_accounts():
                 "free_margin": row[5],
                 "margin_level": row[6],
                 "open_trades": row[7],
-                "timestamp": row[8].replace(tzinfo=pytz.utc).astimezone(lebanon_tz).strftime("%I:%M:%S %p")
-                if isinstance(row[8], datetime) else str(row[8])
+                "timestamp": row[8].astimezone(lebanon_tz).strftime("%I:%M:%S %p")
             }
             for row in accounts
         ]
 
         return jsonify({"accounts": accounts_list}), 200
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ✅ Start the Flask app
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
