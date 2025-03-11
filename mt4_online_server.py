@@ -1,69 +1,111 @@
 from flask import Flask, request, jsonify
 import logging
 import json
+import sqlite3  # Use PostgreSQL if needed
 
 app = Flask(__name__)
-
-# ✅ Enable Debug Logging
 logging.basicConfig(level=logging.DEBUG)
 
+# ✅ Database Connection Function
+def get_db_connection():
+    conn = sqlite3.connect("mt4_data.db")  # Replace with PostgreSQL connection if needed
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# ✅ Create Table If Not Exists
+def create_table():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        broker TEXT,
+        account_number INTEGER UNIQUE,
+        balance REAL,
+        equity REAL,
+        free_margin REAL,
+        profit_loss REAL,
+        margin_percent REAL,
+        open_trades INTEGER
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+create_table()  # Ensure table exists on startup
+
+# ✅ Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = request.get_data(as_text=True)  # ✅ Capture raw JSON input
-        app.logger.debug(f"📥 Raw Request Data: {raw_data}")
+        raw_data = request.data.decode("utf-8").strip()
+        logging.debug(f"📥 Raw Request Data: {raw_data}")
 
-        # ✅ Ensure JSON Parsing
-        try:
-            data = json.loads(raw_data)  # Force JSON parsing
-        except json.JSONDecodeError as e:
-            app.logger.error(f"❌ JSON Decoding Error: {str(e)}")
-            return jsonify({"error": "Invalid JSON format"}), 400
-
-        app.logger.debug(f"✅ Parsed JSON Data: {data}")
+        # ✅ Parse JSON
+        json_data = json.loads(raw_data)
 
         # ✅ Ensure required fields exist
-        required_fields = ["broker", "account_number", "balance", "equity", "free_margin", "profit_loss"]
-        for field in required_fields:
-            if field not in data:
-                app.logger.error(f"❌ Missing field: {field}")
-                return jsonify({"error": f"Missing field: {field}"}), 400
+        required_keys = ["broker", "account_number", "balance", "equity", "free_margin", "profit_loss", "margin_percent", "open_trades"]
+        for key in required_keys:
+            if key not in json_data:
+                logging.error(f"❌ Missing key: {key}")
+                return jsonify({"error": f"Missing key: {key}"}), 400
 
-        # ✅ Convert numeric values to proper types
-        try:
-            account_number = int(data["account_number"])
-            balance = float(data["balance"])
-            equity = float(data["equity"])
-            free_margin = float(data["free_margin"])
-            profit_loss = float(data["profit_loss"])
-            broker = str(data["broker"])
-        except ValueError as e:
-            app.logger.error(f"❌ Value Conversion Error: {str(e)}")
-            return jsonify({"error": "Invalid data types"}), 400
+        # ✅ Extract Data
+        broker = json_data["broker"]
+        account_number = json_data["account_number"]
+        balance = json_data["balance"]
+        equity = json_data["equity"]
+        free_margin = json_data["free_margin"]
+        profit_loss = json_data["profit_loss"]
+        margin_percent = json_data["margin_percent"]
+        open_trades = json_data["open_trades"]
 
-        # ✅ Store data in database (Placeholder Example)
-        app.logger.info(f"✅ Stored Data: {broker} | {account_number} | Balance: {balance} | Equity: {equity} | Free Margin: {free_margin} | P/L: {profit_loss}")
+        # ✅ Store in Database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_number) 
+        DO UPDATE SET balance=?, equity=?, free_margin=?, profit_loss=?, margin_percent=?, open_trades=?
+        """, (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades,
+              balance, equity, free_margin, profit_loss, margin_percent, open_trades))
 
+        conn.commit()
+        conn.close()
+
+        logging.info(f"✅ Data stored successfully for account {account_number} - Broker: {broker}")
         return jsonify({"message": "Data received successfully"}), 200
-    except Exception as e:
-        app.logger.error(f"❌ API Processing Error: {str(e)}")
-        return jsonify({"error": "Internal Server Error"}), 500
 
-# ✅ API Endpoint to Get Accounts
+    except json.JSONDecodeError as e:
+        logging.error(f"❌ JSON Decoding Error: {str(e)}")
+        return jsonify({"error": f"JSON Decoding Error: {str(e)}"}), 400
+
+    except Exception as e:
+        logging.error(f"❌ API Processing Error: {str(e)}")
+        return jsonify({"error": f"API Processing Error: {str(e)}"}), 500
+
+# ✅ Get Data for Dashboard
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
-        # Replace with actual database fetching logic
-        dummy_data = [
-            {"broker": "Swissquote Bank SA", "account_number": 1218923860, "balance": 100000.00, "equity": 99954.69, "free_margin": 98660.80, "profit_loss": -45.31},
-            {"broker": "XTB S.A.", "account_number": 6027176, "balance": 2844.85, "equity": 2638.60, "free_margin": 2596.68, "profit_loss": -206.25}
-        ]
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades 
+        FROM accounts
+        """)
+        accounts = cursor.fetchall()
+        conn.close()
 
-        return jsonify({"accounts": dummy_data}), 200
+        account_list = [dict(acc) for acc in accounts]
+        return jsonify({"accounts": account_list}), 200
+
     except Exception as e:
-        app.logger.error(f"❌ Error fetching accounts: {str(e)}")
-        return jsonify({"error": "Internal Server Error"}), 500
+        logging.error(f"❌ API Fetching Error: {str(e)}")
+        return jsonify({"error": f"API Fetching Error: {str(e)}"}), 500
 
-# ✅ Run Server
+# ✅ Start Flask Server
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
