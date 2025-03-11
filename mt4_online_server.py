@@ -18,22 +18,39 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfx
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ✅ Fix: Improved API to Handle JSON Properly
+# ✅ Fix: Ensure the 'broker' column exists before inserting data
+def ensure_column_exists():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS broker TEXT;")  # ✅ Add 'broker' column if missing
+        cur.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profit_loss FLOAT;")  # ✅ Add 'profit_loss' column if missing
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Database schema updated: Added missing columns if they did not exist.")
+    except Exception as e:
+        logger.error(f"❌ Database schema update error: {str(e)}")
+
+# ✅ Ensure the database has the correct columns before starting
+ensure_column_exists()
+
+# ✅ Fix: API to handle incoming JSON properly
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         raw_data = request.get_data(as_text=True)
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        # ✅ Parse JSON with better error handling
+        # ✅ Parse JSON while stripping NULL characters
         try:
-            data = json.loads(raw_data.strip("\x00"))  # Remove any NULL characters
+            data = json.loads(raw_data.strip("\x00"))
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Decode Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Extract account details
-        broker = data.get("broker")
+        broker = data.get("broker", "Unknown Broker")  # Default to "Unknown Broker" if missing
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
