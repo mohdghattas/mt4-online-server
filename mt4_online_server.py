@@ -1,54 +1,17 @@
-import os
-import psycopg2
-import pytz
-import logging
-from datetime import datetime
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-
-app = Flask(__name__)
-CORS(app)
-
-# ✅ Configure Logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
-
-# ✅ Use Railway's PostgreSQL database URL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
-
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-# ✅ Ensure database schema is correct
-def ensure_database_schema():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # ✅ Add broker column if it doesn't exist
-        cur.execute("""
-            DO $$ 
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='accounts' AND column_name='broker') THEN
-                    ALTER TABLE accounts ADD COLUMN broker TEXT;
-                END IF;
-            END $$;
-        """)
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Database schema checked and updated.")
-    except Exception as e:
-        logger.error(f"❌ Database schema update failed: {str(e)}")
-
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
+        raw_data = request.get_data()
+        logger.debug(f"📥 Raw Request Data: {raw_data}")
+
         data = request.get_json()
         if not data:
+            logger.error("❌ Invalid JSON payload received.")
             return jsonify({"error": "Invalid JSON payload"}), 400
 
+        logger.info(f"✅ Processed Request Data: {data}")
+
+        # ✅ Extract data
         broker = data.get("broker")
         account_number = data.get("account_number")
         balance = data.get("balance")
@@ -86,33 +49,3 @@ def receive_mt4_data():
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT broker, account_number, balance, equity, free_margin, profit_loss FROM accounts ORDER BY timestamp DESC")
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        accounts_list = [
-            {
-                "broker": row[0],
-                "account_number": row[1],
-                "balance": row[2],
-                "equity": row[3],
-                "free_margin": row[4],
-                "profit_loss": row[5]
-            }
-            for row in accounts
-        ]
-        return jsonify({"accounts": accounts_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    # ✅ Ensure database schema is updated before starting
-    ensure_database_schema()
-    app.run(host="0.0.0.0", port=5000)
