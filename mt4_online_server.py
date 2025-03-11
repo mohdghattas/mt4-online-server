@@ -1,53 +1,38 @@
 import os
+import json
 import psycopg2
-import pytz
 import logging
-from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ✅ Initialize Flask App
-app = Flask(__name__)
-CORS(app)  # Enable CORS
-
-# ✅ Set up logging
+# ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
-# ✅ Database Configuration
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway"
-)
+app = Flask(__name__)
+CORS(app)
 
-# ✅ Database Connection Function
+# ✅ Database Configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfxXDkQchLCxKVdYcUu@postgres.railway.internal:5432/railway")
+
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# ----------------------------------------------------
-# ✅ Endpoint: Receive Data from MT4 EA
-# ----------------------------------------------------
+# ✅ Fix: Improved API to Handle JSON Properly
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # ✅ Log raw request data before processing
-        raw_data = request.get_data()
-        logger.debug(f"📥 Raw Request Data (Before Parsing): {raw_data}")
+        raw_data = request.get_data(as_text=True)
+        logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        # ✅ Check Content-Type
-        if request.content_type != "application/json":
-            logger.error("❌ Invalid Content-Type. Expected application/json")
-            return jsonify({"error": "Invalid Content-Type. Expected application/json"}), 400
+        # ✅ Parse JSON with better error handling
+        try:
+            data = json.loads(raw_data.strip("\x00"))  # Remove any NULL characters
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON Decode Error: {str(e)}")
+            return jsonify({"error": "Invalid JSON format"}), 400
 
-        # ✅ Parse JSON
-        data = request.get_json()
-        if not data:
-            logger.error("❌ Invalid JSON payload received.")
-            return jsonify({"error": "Invalid JSON payload"}), 400
-
-        logger.info(f"✅ Processed Request Data: {data}")
-
-        # ✅ Extract data fields
+        # ✅ Extract account details
         broker = data.get("broker")
         account_number = data.get("account_number")
         balance = data.get("balance")
@@ -55,58 +40,48 @@ def receive_mt4_data():
         free_margin = data.get("free_margin")
         profit_loss = data.get("profit_loss")
 
-        # ✅ Ensure required fields exist
-        if not broker or not account_number:
-            logger.error(f"❌ Missing required fields. Data: {data}")
-            return jsonify({"error": "Missing required fields"}), 400
+        if not account_number:
+            logger.error("❌ Missing 'account_number' in request payload")
+            return jsonify({"error": "Missing account_number"}), 400
 
-        # ✅ Convert timestamp to UTC
-        timestamp = datetime.now(pytz.utc)
-
-        # ✅ Store data in database
+        # ✅ Store in database
         conn = get_db_connection()
         cur = conn.cursor()
-
-        sql_query = """
-            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        cur.execute("""
+            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 broker = EXCLUDED.broker,
                 balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity,
                 free_margin = EXCLUDED.free_margin,
-                profit_loss = EXCLUDED.profit_loss,
-                timestamp = EXCLUDED.timestamp;
-        """
-        cur.execute(sql_query, (broker, account_number, balance, equity, free_margin, profit_loss, timestamp))
+                profit_loss = EXCLUDED.profit_loss;
+        """, (broker, account_number, balance, equity, free_margin, profit_loss))
+
         conn.commit()
         cur.close()
         conn.close()
 
-        logger.info("✅ Data stored successfully")
+        logger.info(f"✅ Data stored successfully: {data}")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-# ----------------------------------------------------
-# ✅ Endpoint: Fetch Accounts Data for Dashboard
-# ----------------------------------------------------
+# ✅ Fix `/api/accounts` to return correct data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            "SELECT broker, account_number, balance, equity, free_margin, profit_loss FROM accounts ORDER BY timestamp DESC"
-        )
+        cur.execute("""
+            SELECT broker, account_number, balance, equity, free_margin, profit_loss FROM accounts
+        """)
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
-        # ✅ Convert database results to JSON
         accounts_list = [
             {
                 "broker": row[0],
@@ -114,20 +89,15 @@ def get_accounts():
                 "balance": row[2],
                 "equity": row[3],
                 "free_margin": row[4],
-                "profit_loss": row[5]
-            }
-            for row in accounts
+                "profit_loss": row[5],
+            } for row in accounts
         ]
 
         return jsonify({"accounts": accounts_list}), 200
 
     except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}")
+        logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-# ----------------------------------------------------
-# ✅ Run API Server
-# ----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
