@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import logging
+import json
 
 app = Flask(__name__)
 
@@ -12,7 +13,13 @@ def receive_mt4_data():
         raw_data = request.get_data(as_text=True)  # ✅ Capture raw JSON input
         app.logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        data = request.json  # Convert to JSON object
+        # ✅ Ensure JSON Parsing
+        try:
+            data = json.loads(raw_data)  # Force JSON parsing
+        except json.JSONDecodeError as e:
+            app.logger.error(f"❌ JSON Decoding Error: {str(e)}")
+            return jsonify({"error": "Invalid JSON format"}), 400
+
         app.logger.debug(f"✅ Parsed JSON Data: {data}")
 
         # ✅ Ensure required fields exist
@@ -22,14 +29,19 @@ def receive_mt4_data():
                 app.logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
 
-        # ✅ Process and store data in database (Placeholder Example)
-        account_number = data["account_number"]
-        balance = data["balance"]
-        equity = data["equity"]
-        free_margin = data["free_margin"]
-        profit_loss = data["profit_loss"]
-        broker = data["broker"]
+        # ✅ Convert numeric values to proper types
+        try:
+            account_number = int(data["account_number"])
+            balance = float(data["balance"])
+            equity = float(data["equity"])
+            free_margin = float(data["free_margin"])
+            profit_loss = float(data["profit_loss"])
+            broker = str(data["broker"])
+        except ValueError as e:
+            app.logger.error(f"❌ Value Conversion Error: {str(e)}")
+            return jsonify({"error": "Invalid data types"}), 400
 
+        # ✅ Store data in database (Placeholder Example)
         app.logger.info(f"✅ Stored Data: {broker} | {account_number} | Balance: {balance} | Equity: {equity} | Free Margin: {free_margin} | P/L: {profit_loss}")
 
         return jsonify({"message": "Data received successfully"}), 200
@@ -51,3 +63,7 @@ def get_accounts():
     except Exception as e:
         app.logger.error(f"❌ Error fetching accounts: {str(e)}")
         return jsonify({"error": "Internal Server Error"}), 500
+
+# ✅ Run Server
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
