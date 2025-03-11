@@ -25,12 +25,19 @@ def get_db_connection():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
+        # ✅ Ensure Content-Type is JSON
+        if request.content_type != "application/json":
+            logger.error("❌ Invalid Content-Type: %s", request.content_type)
+            return jsonify({"error": "Invalid Content-Type. Expected application/json"}), 400
+        
         data = request.get_json()
         
         if not data:
             logger.error("❌ Invalid JSON Payload: Received empty data")
             return jsonify({"error": "Invalid JSON payload"}), 400
         
+        logger.info(f"📥 Incoming Payload: {json.dumps(data, indent=4)}")
+
         # Extract & Validate Data
         try:
             account_number = int(data["account_number"])
@@ -71,27 +78,6 @@ def receive_mt4_data():
 
     except Exception as e:
         logger.error(f"❌ API Processing Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# ✅ API to Fetch Account Data
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts")
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        # Convert Data to JSON
-        accounts_list = [{"account_number": row[0], "balance": row[1], "equity": row[2], "margin_used": row[3], 
-                          "free_margin": row[4], "margin_level": row[5], "open_trades": row[6]} for row in accounts]
-
-        return jsonify({"accounts": accounts_list}), 200
-
-    except Exception as e:
-        logger.error(f"❌ API Fetching Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
