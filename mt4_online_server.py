@@ -25,16 +25,11 @@ def receive_mt4_data():
     """Handles data sent from MT4 EA"""
     try:
         # Log raw request data
-        logger.debug(f"📥 Raw Request Headers: {request.headers}")
-        logger.debug(f"📥 Raw Request Data: {request.data}")
+        raw_data = request.data.decode("utf-8").strip("\x00")  # ✅ Remove null character
+        logger.debug(f"📥 Raw Request Data (Processed): {raw_data}")
 
-        # Check if request is JSON
-        if not request.is_json:
-            logger.error("❌ Request is not in JSON format")
-            return jsonify({"error": "Content-Type must be application/json"}), 400
-
-        data = request.get_json()
-        logger.debug(f"📥 Parsed JSON Payload: {json.dumps(data, indent=2)}")
+        # Convert to JSON
+        data = json.loads(raw_data)  # ✅ Parse JSON safely
 
         # Validate required fields
         required_fields = [
@@ -46,8 +41,8 @@ def receive_mt4_data():
                 logger.error(f"❌ Missing required field: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Extract data
-        account_number = data["account_number"]
+        # Extract and convert data
+        account_number = int(data["account_number"])
         balance = float(data["balance"])
         equity = float(data["equity"])
         margin_used = float(data["margin_used"])
@@ -58,7 +53,7 @@ def receive_mt4_data():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # ✅ Insert or update data for each account
+        # ✅ Insert or update data
         sql_query = """
             INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, last_update)
             VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
@@ -86,37 +81,3 @@ def receive_mt4_data():
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    """Fetches all account data"""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts ORDER BY last_update DESC")
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        accounts_list = [
-            {
-                "account_number": row[0],
-                "balance": row[1],
-                "equity": row[2],
-                "margin_used": row[3],
-                "free_margin": row[4],
-                "margin_level": row[5],
-                "open_trades": row[6],
-            }
-            for row in accounts
-        ]
-        return jsonify({"accounts": accounts_list}), 200
-
-    except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
