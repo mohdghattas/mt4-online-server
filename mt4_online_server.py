@@ -1,84 +1,54 @@
-import os
-import psycopg2
-import pytz
-import json
-import logging
-from datetime import datetime
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+const express = require('express');
+const app = express();
 
-# Initialize Flask App
-app = Flask(__name__)
-CORS(app)
+// Middleware to parse JSON bodies and log requests
+app.use(express.json());  // parse JSON body
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.url} - Content-Type: ${req.headers['content-type']}`);
+    next();
+});
 
-# ✅ Configure Logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+// POST handler for /api/mt4data
+app.post('/api/mt4data', (req, res) => {
+    // Enforce Content-Type: application/json
+    if (!req.is('application/json')) {
+        console.error('Rejecting request with wrong Content-Type');
+        return res.status(400).json({ error: 'Content-Type must be application/json' });
+    }
+    // Validate request body exists and is JSON
+    const data = req.body;
+    if (!data || Object.keys(data).length === 0) {
+        console.error('Rejecting request with no JSON body');
+        return res.status(400).json({ error: 'Request JSON body is required' });
+    }
+    // (Optional) Validate expected fields in data, e.g.:
+    // if (!data.account || !data.balance) { ... respond with 400 ... }
 
-# ✅ PostgreSQL Database Connection
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@postgres.railway.internal:5432/railway")
+    // Process the data (e.g., save to database)
+    try {
+        // db.saveMT4Data(data);  // Pseudo-code for database save
+        console.log('Received MT4 data:', JSON.stringify(data));
+        // On success, send a confirmation response
+        res.status(200).json({ status: 'success', message: 'Data received' });
+    } catch (err) {
+        console.error('Database save error:', err);
+        res.status(500).json({ status: 'error', message: 'Server error saving data' });
+    }
+});
 
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+// (Optional) GET handler for /api/mt4data to support dashboard data retrieval
+app.get('/api/mt4data', (req, res) => {
+    try {
+        // const records = db.fetchMT4Data();  // fetch data from DB (pseudo-code)
+        const records = [];  // placeholder for fetched records
+        res.status(200).json({ records: records });
+    } catch (err) {
+        console.error('Database fetch error:', err);
+        res.status(500).json({ status: 'error', message: 'Server error fetching data' });
+    }
+});
 
-# ✅ API to Receive MT4 Data
-@app.route("/api/mt4data", methods=["POST"])
-def receive_mt4_data():
-    try:
-        # ✅ Ensure Content-Type is JSON
-        if request.content_type != "application/json":
-            logger.error("❌ Invalid Content-Type: %s", request.content_type)
-            return jsonify({"error": "Invalid Content-Type. Expected application/json"}), 400
-        
-        data = request.get_json()
-        
-        if not data:
-            logger.error("❌ Invalid JSON Payload: Received empty data")
-            return jsonify({"error": "Invalid JSON payload"}), 400
-        
-        logger.info(f"📥 Incoming Payload: {json.dumps(data, indent=4)}")
-
-        # Extract & Validate Data
-        try:
-            account_number = int(data["account_number"])
-            balance = float(data["balance"])
-            equity = float(data["equity"])
-            margin_used = float(data["margin_used"])
-            free_margin = float(data["free_margin"])
-            margin_level = float(data["margin_level"])
-            open_trades = int(data["open_trades"])
-        except (KeyError, ValueError) as e:
-            logger.error(f"❌ Data Parsing Error: {e}")
-            return jsonify({"error": "Invalid data format"}), 400
-        
-        # ✅ Store timestamps in UTC
-        timestamp = datetime.now(pytz.utc)
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-        sql_query = """
-            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (account_number) DO UPDATE SET
-                balance = EXCLUDED.balance,
-                equity = EXCLUDED.equity,
-                margin_used = EXCLUDED.margin_used,
-                free_margin = EXCLUDED.free_margin,
-                margin_level = EXCLUDED.margin_level,
-                open_trades = EXCLUDED.open_trades,
-                timestamp = EXCLUDED.timestamp;
-        """
-        cur.execute(sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, timestamp))
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        logger.info(f"✅ Data Stored Successfully for Account: {account_number}")
-        return jsonify({"message": "Data stored successfully"}), 200
-
-    except Exception as e:
-        logger.error(f"❌ API Processing Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+// Start the server (adjust port as needed)
+app.listen(3000, () => {
+    console.log('API server is running on port 3000');
+});
