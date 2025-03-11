@@ -19,6 +19,29 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:eYyOaijFUdLBWDfx
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
+# ✅ Ensure database schema is correct
+def ensure_database_schema():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # ✅ Add broker column if it doesn't exist
+        cur.execute("""
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='accounts' AND column_name='broker') THEN
+                    ALTER TABLE accounts ADD COLUMN broker TEXT;
+                END IF;
+            END $$;
+        """)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Database schema checked and updated.")
+    except Exception as e:
+        logger.error(f"❌ Database schema update failed: {str(e)}")
+
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
@@ -41,6 +64,7 @@ def receive_mt4_data():
 
         conn = get_db_connection()
         cur = conn.cursor()
+
         sql_query = """
             INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -89,4 +113,6 @@ def get_accounts():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
+    # ✅ Ensure database schema is updated before starting
+    ensure_database_schema()
     app.run(host="0.0.0.0", port=5000)
