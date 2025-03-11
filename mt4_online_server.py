@@ -1,111 +1,62 @@
-from flask import Flask, request, jsonify
-import logging
+import os
 import json
-import sqlite3  # Use PostgreSQL if needed
+import psycopg2
+import logging
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+# ✅ Setup logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("mt4_online_server")
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.DEBUG)
+CORS(app)
 
-# ✅ Database Connection Function
+# ✅ Database Configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "your_postgres_url")
+
 def get_db_connection():
-    conn = sqlite3.connect("mt4_data.db")  # Replace with PostgreSQL connection if needed
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL)
 
-# ✅ Create Table If Not Exists
-def create_table():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        broker TEXT,
-        account_number INTEGER UNIQUE,
-        balance REAL,
-        equity REAL,
-        free_margin REAL,
-        profit_loss REAL,
-        margin_percent REAL,
-        open_trades INTEGER
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-create_table()  # Ensure table exists on startup
-
-# ✅ Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = request.data.decode("utf-8").strip()
-        logging.debug(f"📥 Raw Request Data: {raw_data}")
+        raw_data = request.get_data(as_text=True)
+        logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        # ✅ Parse JSON
-        json_data = json.loads(raw_data)
+        data = json.loads(raw_data.strip("\x00"))
 
-        # ✅ Ensure required fields exist
-        required_keys = ["broker", "account_number", "balance", "equity", "free_margin", "profit_loss", "margin_percent", "open_trades"]
-        for key in required_keys:
-            if key not in json_data:
-                logging.error(f"❌ Missing key: {key}")
-                return jsonify({"error": f"Missing key: {key}"}), 400
+        broker = data.get("broker", "Unknown Broker")
+        account_number = data.get("account_number")
+        balance = data.get("balance")
+        equity = data.get("equity")
+        free_margin = data.get("free_margin")
+        profit_loss = data.get("profit_loss")
+        open_charts = data.get("open_charts")
+        ea_names = data.get("ea_names")
+        traded_pairs = data.get("traded_pairs")
+        deposit = data.get("deposit")
+        withdrawal = data.get("withdrawal")
 
-        # ✅ Extract Data
-        broker = json_data["broker"]
-        account_number = json_data["account_number"]
-        balance = json_data["balance"]
-        equity = json_data["equity"]
-        free_margin = json_data["free_margin"]
-        profit_loss = json_data["profit_loss"]
-        margin_percent = json_data["margin_percent"]
-        open_trades = json_data["open_trades"]
-
-        # ✅ Store in Database
         conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-        INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(account_number) 
-        DO UPDATE SET balance=?, equity=?, free_margin=?, profit_loss=?, margin_percent=?, open_trades=?
-        """, (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades,
-              balance, equity, free_margin, profit_loss, margin_percent, open_trades))
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, open_charts, ea_names, traded_pairs, deposit, withdrawal)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (account_number) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                equity = EXCLUDED.equity,
+                free_margin = EXCLUDED.free_margin,
+                profit_loss = EXCLUDED.profit_loss;
+        """, (broker, account_number, balance, equity, free_margin, profit_loss, open_charts, ea_names, traded_pairs, deposit, withdrawal))
 
         conn.commit()
+        cur.close()
         conn.close()
 
-        logging.info(f"✅ Data stored successfully for account {account_number} - Broker: {broker}")
-        return jsonify({"message": "Data received successfully"}), 200
-
-    except json.JSONDecodeError as e:
-        logging.error(f"❌ JSON Decoding Error: {str(e)}")
-        return jsonify({"error": f"JSON Decoding Error: {str(e)}"}), 400
-
+        return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
-        logging.error(f"❌ API Processing Error: {str(e)}")
-        return jsonify({"error": f"API Processing Error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
-# ✅ Get Data for Dashboard
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-        SELECT broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, open_trades 
-        FROM accounts
-        """)
-        accounts = cursor.fetchall()
-        conn.close()
-
-        account_list = [dict(acc) for acc in accounts]
-        return jsonify({"accounts": account_list}), 200
-
-    except Exception as e:
-        logging.error(f"❌ API Fetching Error: {str(e)}")
-        return jsonify({"error": f"API Fetching Error: {str(e)}"}), 500
-
-# ✅ Start Flask Server
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
