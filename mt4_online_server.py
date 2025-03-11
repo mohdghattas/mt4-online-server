@@ -1,58 +1,52 @@
 import os
 import psycopg2
 import pytz
+import json
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Initialize Flask app
+# Initialize Flask App
 app = Flask(__name__)
 CORS(app)
 
-# Setup logging
+# ✅ Configure Logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Database connection string
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
+# ✅ PostgreSQL Database Connection
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@postgres.railway.internal:5432/railway")
 
 def get_db_connection():
-    """Establish a database connection"""
     return psycopg2.connect(DATABASE_URL)
 
+# ✅ API to Receive MT4 Data
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
-    """Receives account data from MT4 EA and updates database"""
     try:
-        if request.content_type != "application/json":
-            logger.error("❌ Invalid Content-Type: %s", request.content_type)
-            return jsonify({"error": "Invalid Content-Type. Expected application/json"}), 400
-
         data = request.get_json()
-
+        
         if not data:
-            logger.error("❌ Empty JSON payload received")
+            logger.error("❌ Invalid JSON Payload: Received empty data")
             return jsonify({"error": "Invalid JSON payload"}), 400
-
-        logger.debug("[DEBUG] Incoming Payload: %s", data)
-
-        # Extract account details
-        account_number = data.get("account_number")
-        balance = data.get("balance")
-        equity = data.get("equity")
-        margin_used = data.get("margin_used")
-        free_margin = data.get("free_margin")
-        margin_level = data.get("margin_level")
-        open_trades = data.get("open_trades")
-
-        if not account_number:
-            return jsonify({"error": "Missing account_number"}), 400
-
-        # Store timestamps in UTC
+        
+        # Extract & Validate Data
+        try:
+            account_number = int(data["account_number"])
+            balance = float(data["balance"])
+            equity = float(data["equity"])
+            margin_used = float(data["margin_used"])
+            free_margin = float(data["free_margin"])
+            margin_level = float(data["margin_level"])
+            open_trades = int(data["open_trades"])
+        except (KeyError, ValueError) as e:
+            logger.error(f"❌ Data Parsing Error: {e}")
+            return jsonify({"error": "Invalid data format"}), 400
+        
+        # ✅ Store timestamps in UTC
         timestamp = datetime.now(pytz.utc)
 
-        # Insert or update account data
         conn = get_db_connection()
         cur = conn.cursor()
         sql_query = """
@@ -72,42 +66,32 @@ def receive_mt4_data():
         cur.close()
         conn.close()
 
-        logger.info("✅ Account %s updated successfully", account_number)
+        logger.info(f"✅ Data Stored Successfully for Account: {account_number}")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
-        logger.error("❌ API Processing Error: %s", str(e))
+        logger.error(f"❌ API Processing Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ✅ API to Fetch Account Data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
-    """Fetches all active accounts from the database"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts ORDER BY timestamp DESC
-        """)
+        cur.execute("SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts")
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
-        accounts_list = [
-            {
-                "account_number": row[0],
-                "balance": row[1],
-                "equity": row[2],
-                "margin_used": row[3],
-                "free_margin": row[4],
-                "margin_level": row[5],
-                "open_trades": row[6]
-            }
-            for row in accounts
-        ]
+        # Convert Data to JSON
+        accounts_list = [{"account_number": row[0], "balance": row[1], "equity": row[2], "margin_used": row[3], 
+                          "free_margin": row[4], "margin_level": row[5], "open_trades": row[6]} for row in accounts]
+
         return jsonify({"accounts": accounts_list}), 200
 
     except Exception as e:
-        logger.error("❌ Error fetching accounts: %s", str(e))
+        logger.error(f"❌ API Fetching Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
