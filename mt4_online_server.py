@@ -11,9 +11,8 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# ✅ Use Railway's PostgreSQL database URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:yourpassword@postgres.railway.internal:5432/railway")
 
 
@@ -25,12 +24,17 @@ def get_db_connection():
 def receive_mt4_data():
     """Handles data sent from MT4 EA"""
     try:
+        # Log raw request data
+        logger.debug(f"📥 Raw Request Headers: {request.headers}")
+        logger.debug(f"📥 Raw Request Data: {request.data}")
+
+        # Check if request is JSON
         if not request.is_json:
             logger.error("❌ Request is not in JSON format")
             return jsonify({"error": "Content-Type must be application/json"}), 400
 
         data = request.get_json()
-        logger.debug(f"📥 Incoming Payload: {json.dumps(data, indent=2)}")
+        logger.debug(f"📥 Parsed JSON Payload: {json.dumps(data, indent=2)}")
 
         # Validate required fields
         required_fields = [
@@ -42,13 +46,14 @@ def receive_mt4_data():
                 logger.error(f"❌ Missing required field: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Extract data
         account_number = data["account_number"]
-        balance = data["balance"]
-        equity = data["equity"]
-        margin_used = data["margin_used"]
-        free_margin = data["free_margin"]
-        margin_level = data["margin_level"]
-        open_trades = data["open_trades"]
+        balance = float(data["balance"])
+        equity = float(data["equity"])
+        margin_used = float(data["margin_used"])
+        free_margin = float(data["free_margin"])
+        margin_level = float(data["margin_level"])
+        open_trades = int(data["open_trades"])
 
         conn = get_db_connection()
         cur = conn.cursor()
@@ -73,6 +78,10 @@ def receive_mt4_data():
 
         logger.info("✅ Data stored successfully")
         return jsonify({"message": "Data stored successfully"}), 200
+
+    except json.JSONDecodeError:
+        logger.error("❌ Failed to decode JSON")
+        return jsonify({"error": "Invalid JSON format"}), 400
 
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}")
