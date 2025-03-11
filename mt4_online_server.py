@@ -3,6 +3,7 @@ import psycopg2
 import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from datetime import datetime, timedelta
 
 # Configure Logging
 logging.basicConfig(level=logging.DEBUG)
@@ -27,11 +28,26 @@ def get_db_connection():
 def receive_mt4_data():
     try:
         data = request.get_json()
-        if not data:
+
+        # ✅ Validate JSON structure
+        if not data or not isinstance(data, dict):
             return jsonify({"error": "Invalid JSON payload"}), 400
+
+        required_fields = [
+            "account_number",
+            "balance",
+            "equity",
+            "margin_used",
+            "free_margin",
+            "margin_level",
+            "open_trades"
+        ]
+        if not all(field in data for field in required_fields):
+            return jsonify({"error": "Missing required fields"}), 400
 
         logger.debug(f"📥 Incoming Payload: {data}")
 
+        # Extract values
         account_number = data.get("account_number")
         balance = data.get("balance")
         equity = data.get("equity")
@@ -39,27 +55,27 @@ def receive_mt4_data():
         free_margin = data.get("free_margin")
         margin_level = data.get("margin_level")
         open_trades = data.get("open_trades")
-
-        if not account_number:
-            return jsonify({"error": "Missing account_number"}), 400
+        last_update = datetime.utcnow()  # Store in UTC
 
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # ✅ Insert or Update the record
         sql_query = """
-            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO accounts (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, last_update)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity,
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_level = EXCLUDED.margin_level,
-                open_trades = EXCLUDED.open_trades;
+                open_trades = EXCLUDED.open_trades,
+                last_update = EXCLUDED.last_update;
         """
 
         cur.execute(
-            sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades)
+            sql_query, (account_number, balance, equity, margin_used, free_margin, margin_level, open_trades, last_update)
         )
         conn.commit()
         cur.close()
@@ -79,6 +95,12 @@ def get_accounts():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # ✅ Remove inactive accounts (no update for 5+ minutes)
+        timeout = datetime.utcnow() - timedelta(minutes=5)
+        cur.execute("DELETE FROM accounts WHERE last_update < %s", (timeout,))
+        conn.commit()
+
         cur.execute(
             "SELECT account_number, balance, equity, margin_used, free_margin, margin_level, open_trades FROM accounts"
         )
