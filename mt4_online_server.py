@@ -1,56 +1,105 @@
 from flask import Flask, request, jsonify
 import json
+import psycopg2
+import os
 import logging
 
+# Initialize Flask app
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-@app.route('/updateStats', methods=['POST'])
-def update_stats():
-    # Ensure request contains JSON
-    if "application/json" not in request.content_type.lower():
-        return jsonify({"error": "Unsupported Media Type. Use application/json"}), 415
+# Setup logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("mt4_online_server")
 
-    # Debug log raw request
-    raw_data = request.data
-    print("Received raw data:", raw_data)
+# Database connection function
+def get_db_connection():
+    return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-    # Parse JSON
+# Ensure necessary columns exist in the database
+def ensure_column_exists():
     try:
-        data = json.loads(raw_data)
-    except json.JSONDecodeError as e:
-        print("JSON parsing failed:", str(e))
-        return jsonify({"error": "Invalid JSON format"}), 400
+        conn = get_db_connection()
+        cur = conn.cursor()
+        columns = [
+            "open_charts INT",
+            "ea_names TEXT",
+            "traded_pairs TEXT",
+            "deposit_withdrawal FLOAT",
+            "margin_percent FLOAT",
+            "realized_pl_daily FLOAT",
+            "realized_pl_weekly FLOAT",
+            "realized_pl_monthly FLOAT",
+            "realized_pl_yearly FLOAT"
+        ]
+        for col in columns:
+            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Database schema updated: Added missing columns if they did not exist.")
+    except Exception as e:
+        logger.error(f"❌ Database schema update error: {str(e)}")
 
-    # Extract fields
-    realized_pl_daily = data.get("realized_pl_daily", 0.0)
-    realized_pl_weekly = data.get("realized_pl_weekly", 0.0)
-    realized_pl_monthly = data.get("realized_pl_monthly", 0.0)
-    realized_pl_yearly = data.get("realized_pl_yearly", 0.0)
-    margin_percent = data.get("margin_percent", 0.0)
-    total_deposits = data.get("total_deposits", 0.0)
-    total_withdrawals = data.get("total_withdrawals", 0.0)
-    open_charts = data.get("open_charts", 0)
+# API Endpoint: Receive Data from MT4 EA
+@app.route("/api/mt4data", methods=["POST"])
+def receive_mt4_data():
+    try:
+        # Ensure request has the correct content type
+        if "application/json" not in request.content_type.lower():
+            return jsonify({"error": "Unsupported Media Type. Use application/json"}), 415
+        
+        raw_data = request.get_json()
+        if not raw_data:
+            return jsonify({"error": "Invalid JSON format"}), 400
+        
+        logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-    # Simulated database save
-    print(f"Saving stats: {data}")
+        # Extract Data
+        broker = raw_data.get("broker", "Unknown")
+        account_number = raw_data["account_number"]
+        balance = raw_data["balance"]
+        equity = raw_data["equity"]
+        free_margin = raw_data["free_margin"]
+        profit_loss = raw_data["profit_loss"]
+        margin_percent = raw_data.get("margin_percent", 0.0)
+        realized_pl_daily = raw_data.get("realized_pl_daily", 0.0)
+        realized_pl_weekly = raw_data.get("realized_pl_weekly", 0.0)
+        realized_pl_monthly = raw_data.get("realized_pl_monthly", 0.0)
+        realized_pl_yearly = raw_data.get("realized_pl_yearly", 0.0)
+        open_charts = raw_data.get("open_charts", 0)
 
-    return jsonify({"status": "success"}), 200
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-@app.route('/getStats', methods=['GET'])
-def get_stats():
-    # Simulated retrieval of stats
-    stats = {
-        "realized_pl_daily": 123.45,
-        "realized_pl_weekly": -50.0,
-        "realized_pl_monthly": 300.0,
-        "realized_pl_yearly": 5000.0,
-        "margin_percent": 95.6,
-        "total_deposits": 10000.0,
-        "total_withdrawals": 5000.0,
-        "open_charts": 3
-    }
-    return jsonify(stats), 200
+        # Insert or Update Data
+        cur.execute("""
+            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, open_charts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (account_number) DO UPDATE SET
+                broker = EXCLUDED.broker,
+                balance = EXCLUDED.balance,
+                equity = EXCLUDED.equity,
+                free_margin = EXCLUDED.free_margin,
+                profit_loss = EXCLUDED.profit_loss,
+                margin_percent = EXCLUDED.margin_percent,
+                realized_pl_daily = EXCLUDED.realized_pl_daily,
+                realized_pl_weekly = EXCLUDED.realized_pl_weekly,
+                realized_pl_monthly = EXCLUDED.realized_pl_monthly,
+                realized_pl_yearly = EXCLUDED.realized_pl_yearly,
+                open_charts = EXCLUDED.open_charts;
+        """, (broker, account_number, balance, equity, free_margin, profit_loss, margin_percent, realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, open_charts))
 
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"✅ Data stored successfully: {raw_data}")
+        return jsonify({"message": "Data stored successfully"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ API Processing Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# Start the server
 if __name__ == "__main__":
-    app.run(debug=True)
+    ensure_column_exists()
+    app.run(host="0.0.0.0", port=5000)
