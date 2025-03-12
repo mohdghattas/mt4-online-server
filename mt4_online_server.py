@@ -1,23 +1,30 @@
 from flask import Flask, request, jsonify
 import psycopg2
+import os
 import logging
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
-DATABASE_URL = "your_database_url_here"  # Replace with your actual database URL
+# ✅ Ensure you use the correct database URL
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://your_username:your_password@your_host:your_port/your_database")
 
-# Function to get a database connection
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logger.error(f"❌ Database Connection Error: {str(e)}")
+        return None
 
-# Ensure all required columns exist
+# ✅ Check and create missing columns automatically
 def ensure_columns_exist():
-    """Ensures new columns exist in the database."""
     conn = get_db_connection()
+    if conn is None:
+        return
+
     cur = conn.cursor()
-    
     try:
         cur.execute("""
         ALTER TABLE accounts 
@@ -42,9 +49,13 @@ def ensure_columns_exist():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     """Receives and processes data from the MT4 EA."""
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    ensure_columns_exist()
+
     try:
-        ensure_columns_exist()  # Ensure columns exist before inserting data
-        
         raw_data = request.get_data(as_text=True)
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
@@ -70,9 +81,7 @@ def receive_mt4_data():
         realized_pl_yearly = data.get("realized_pl_yearly", 0.0)
 
         # Store data in database
-        conn = get_db_connection()
         cur = conn.cursor()
-
         query = """
         INSERT INTO accounts (
             broker, account_number, balance, equity, free_margin, profit_loss,
@@ -115,10 +124,13 @@ def receive_mt4_data():
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     """Fetches all account data."""
-    try:
-        ensure_columns_exist()  # Ensure columns exist
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify({"error": "Database connection failed"}), 500
 
-        conn = get_db_connection()
+    ensure_columns_exist()
+
+    try:
         cur = conn.cursor()
         cur.execute("SELECT * FROM accounts;")
         rows = cur.fetchall()
@@ -138,6 +150,7 @@ def get_accounts():
     except Exception as e:
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
