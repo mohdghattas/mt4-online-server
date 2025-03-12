@@ -1,135 +1,93 @@
 from flask import Flask, request, jsonify
-import psycopg2
 import logging
-import os
 import json
-import traceback
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
+# Assuming use of an ORM like SQLAlchemy for a table "account_stats"
+from models import AccountStats, db  # hypothetical import of the ORM model and db session
 
-# Database connection function
-def get_db_connection():
-    return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
+@app.route('/updateStats', methods=['POST'])
+def update_stats():
+    # 1. Content-Type validation
+    if request.content_type is None or "application/json" not in request.content_type.lower():
+        app.logger.warning(f"Unsupported Content-Type: {request.content_type}")
+        return jsonify({"error": "Unsupported Media Type. Please use application/json"}), 415
 
-# Ensure necessary columns exist in the database
-def ensure_column_exists():
+    # 2. JSON parsing with error handling
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        columns = [
-            "open_charts INT", "ea_names TEXT", "traded_pairs TEXT", 
-            "deposit_withdrawal FLOAT", "margin_percent FLOAT", 
-            "realized_pl_daily FLOAT", "realized_pl_weekly FLOAT", 
-            "realized_pl_monthly FLOAT", "realized_pl_yearly FLOAT", 
-            "last_update TIMESTAMP DEFAULT NOW()"
-        ]
-        for col in columns:
-            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Database schema updated: Added missing columns if needed.")
+        data = request.get_json(force=True)  # force parse JSON
     except Exception as e:
-        logger.error(f"❌ Database schema update error: {str(e)}")
+        app.logger.error(f"JSONDecodeError: {e}. Body: {request.data}")
+        return jsonify({"error": "Bad Request - JSON parse error"}), 400
+    if data is None:
+        # get_json may return None if JSON is empty or invalid even with force
+        app.logger.error(f"No JSON payload received. Body: {request.data}")
+        return jsonify({"error": "Bad Request - no JSON data"}), 400
 
-# API Endpoint: Receive Data from MT4 EA
-@app.route("/api/mt4data", methods=["POST"])
-def receive_mt4_data():
+    # 3. Extract fields from JSON
+    # Using dict.get to safely get values (will return None if key is missing, which you can handle as needed)
+    realized_pl_daily   = data.get('realized_pl_daily')
+    realized_pl_weekly  = data.get('realized_pl_weekly')
+    realized_pl_monthly = data.get('realized_pl_monthly')
+    realized_pl_yearly  = data.get('realized_pl_yearly')
+    margin_percent      = data.get('margin_percent')
+    total_deposits      = data.get('total_deposits')
+    total_withdrawals   = data.get('total_withdrawals')
+    open_charts         = data.get('open_charts')
+
+    # (Optional) Validate that none of these are None if they are all expected to be present.
+    # If any important field is missing, you might log or set default.
+    # For example:
+    # if realized_pl_daily is None:
+    #     app.logger.warning("Missing realized_pl_daily in JSON payload")
+
+    # 4. Store to database
     try:
-        if request.content_type != "application/json":
-            return jsonify({"error": "Unsupported Media Type"}), 415
+        # If updating an existing entry (assuming one per account), find it first:
+        # stats = AccountStats.query.filter_by(account_id = some_id).first()
+        # if not stats:
+        #     stats = AccountStats(account_id=some_id)
+        # Then update fields...
+        stats = AccountStats()  # creating new record for simplicity
+        stats.realized_pl_daily   = realized_pl_daily
+        stats.realized_pl_weekly  = realized_pl_weekly
+        stats.realized_pl_monthly = realized_pl_monthly
+        stats.realized_pl_yearly  = realized_pl_yearly
+        stats.margin_percent      = margin_percent
+        stats.total_deposits      = total_deposits
+        stats.total_withdrawals   = total_withdrawals
+        stats.open_charts         = open_charts
 
-        raw_data = request.get_json()
-        if not raw_data:
-            return jsonify({"error": "Invalid JSON format"}), 400
-
-        logger.debug(f"📥 Raw Request Data: {json.dumps(raw_data, indent=2)}")
-
-        # Extract data
-        broker = raw_data.get("broker", "Unknown")
-        account_number = raw_data["account_number"]
-        balance = raw_data["balance"]
-        equity = raw_data["equity"]
-        free_margin = raw_data["free_margin"]
-        profit_loss = raw_data["profit_loss"]
-        open_charts = raw_data.get("open_charts", 0)
-        ea_names = raw_data.get("ea_names", "")
-        traded_pairs = raw_data.get("traded_pairs", "")
-        deposit_withdrawal = raw_data.get("deposit_withdrawal", 0.0)
-        margin_percent = raw_data.get("margin_percent", 0.0)
-        realized_pl_daily = raw_data.get("realized_pl_daily", 0.0)
-        realized_pl_weekly = raw_data.get("realized_pl_weekly", 0.0)
-        realized_pl_monthly = raw_data.get("realized_pl_monthly", 0.0)
-        realized_pl_yearly = raw_data.get("realized_pl_yearly", 0.0)
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # Insert or update data
-        cur.execute("""
-            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, 
-                                  open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent, 
-                                  realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, last_update)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (account_number) DO UPDATE SET 
-                broker = EXCLUDED.broker, balance = EXCLUDED.balance, equity = EXCLUDED.equity, 
-                free_margin = EXCLUDED.free_margin, profit_loss = EXCLUDED.profit_loss, 
-                open_charts = EXCLUDED.open_charts, ea_names = EXCLUDED.ea_names, 
-                traded_pairs = EXCLUDED.traded_pairs, deposit_withdrawal = EXCLUDED.deposit_withdrawal, 
-                margin_percent = EXCLUDED.margin_percent, realized_pl_daily = EXCLUDED.realized_pl_daily, 
-                realized_pl_weekly = EXCLUDED.realized_pl_weekly, realized_pl_monthly = EXCLUDED.realized_pl_monthly, 
-                realized_pl_yearly = EXCLUDED.realized_pl_yearly, last_update = NOW();
-        """, (broker, account_number, balance, equity, free_margin, profit_loss, open_charts, ea_names,
-              traded_pairs, deposit_withdrawal, margin_percent, realized_pl_daily, realized_pl_weekly,
-              realized_pl_monthly, realized_pl_yearly))
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        logger.info(f"✅ Data stored successfully: {json.dumps(raw_data, indent=2)}")
-        return jsonify({"message": "Data stored successfully"}), 200
-
+        db.session.add(stats)
+        db.session.commit()
     except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({"error": str(e)}), 500
+        app.logger.error(f"Database error on saving stats: {e}")
+        return jsonify({"error": "Internal Server Error - DB failure"}), 500
 
-# API Endpoint: Retrieve Accounts Data
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT broker, account_number, balance, equity, free_margin, profit_loss, open_charts, 
-                   ea_names, traded_pairs, deposit_withdrawal, margin_percent, realized_pl_daily, 
-                   realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, last_update
-            FROM accounts
-            ORDER BY profit_loss ASC;
-        """)
+    app.logger.info("Stats updated successfully in the database.")
+    return jsonify({"status": "success"}), 200
 
-        accounts = cur.fetchall()
-        cur.close()
-        conn.close()
+@app.route('/getStats', methods=['GET'])
+def get_stats():
+    # Retrieve the latest stats (adjust query as needed for your schema)
+    stats = AccountStats.query.order_by(AccountStats.id.desc()).first()
+    if not stats:
+        return jsonify({"error": "No stats available"}), 404
 
-        accounts_data = [{
-            "broker": row[0], "account_number": row[1], "balance": row[2], "equity": row[3], 
-            "free_margin": row[4], "profit_loss": row[5], "open_charts": row[6], 
-            "ea_names": row[7], "traded_pairs": row[8], "deposit_withdrawal": row[9], 
-            "margin_percent": row[10], "realized_pl_daily": row[11], "realized_pl_weekly": row[12], 
-            "realized_pl_monthly": row[13], "realized_pl_yearly": row[14], "last_update": row[15]
-        } for row in accounts]
+    # Return all the stats fields in JSON
+    return jsonify({
+        "realized_pl_daily":   stats.realized_pl_daily,
+        "realized_pl_weekly":  stats.realized_pl_weekly,
+        "realized_pl_monthly": stats.realized_pl_monthly,
+        "realized_pl_yearly":  stats.realized_pl_yearly,
+        "margin_percent":      stats.margin_percent,
+        "total_deposits":      stats.total_deposits,
+        "total_withdrawals":   stats.total_withdrawals,
+        "open_charts":         stats.open_charts
+    }), 200
 
-        return jsonify({"accounts": accounts_data})
-
-    except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({"error": str(e)}), 500
-
+# Run the Flask app (in production use a proper WSGI server)
 if __name__ == "__main__":
-    ensure_column_exists()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)
