@@ -6,7 +6,7 @@ import os
 import json
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow CORS for frontend
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow frontend access
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -16,32 +16,58 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
+# ✅ Ensure database schema integrity
+def ensure_columns():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        columns = [
+            "margin_used FLOAT",
+            "open_charts INT",
+            "open_trades INT",
+            "realized_pl_daily FLOAT",
+            "realized_pl_weekly FLOAT",
+            "realized_pl_monthly FLOAT",
+            "realized_pl_yearly FLOAT",
+            "profit_loss FLOAT"
+        ]
+        for col in columns:
+            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Database schema updated successfully")
+    except Exception as e:
+        logger.error(f"❌ Database schema error: {str(e)}")
+
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # ✅ Log raw request data
-        raw_data = request.get_data(as_text=True).strip()
+        # ✅ Read and decode request data
+        raw_data = request.data.decode("utf-8", errors="replace").strip()
         logger.debug(f"📥 Cleaned Request Data: {raw_data}")
 
-        # ✅ Ensure it's valid JSON
+        # ✅ Validate JSON structure
         try:
             json_data = json.loads(raw_data)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
-        # ✅ Validate required fields
-        if "account_number" not in json_data:
-            logger.error("❌ Missing account_number field")
-            return jsonify({"error": "account_number is required"}), 400
+        # ✅ Ensure required fields exist
+        required_fields = ["account_number", "broker", "balance", "equity", "margin_used"]
+        for field in required_fields:
+            if field not in json_data:
+                logger.error(f"❌ Missing field: {field}")
+                return jsonify({"error": f"Missing field: {field}"}), 400
 
         # ✅ Extract data
-        broker = json_data.get("broker", "Unknown")
+        broker = json_data["broker"]
         account_number = json_data["account_number"]
-        balance = json_data.get("balance", 0.0)
-        equity = json_data.get("equity", 0.0)
-        margin_used = json_data.get("margin_used", 0.0)
+        balance = json_data["balance"]
+        equity = json_data["equity"]
+        margin_used = json_data["margin_used"]
         free_margin = json_data.get("free_margin", 0.0)
         margin_percent = json_data.get("margin_percent", 0.0)
         profit_loss = json_data.get("profit_loss", 0.0)
@@ -52,7 +78,7 @@ def receive_mt4_data():
         open_charts = json_data.get("open_charts", 0)
         open_trades = json_data.get("open_trades", 0)
 
-        # ✅ Database operations
+        # ✅ Database update
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -132,6 +158,7 @@ def get_accounts():
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ Run Flask Server
+# ✅ Initialize Database on Startup
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    ensure_columns()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
