@@ -1,26 +1,50 @@
 from flask import Flask, request, jsonify
-import logging
 import psycopg2
-from psycopg2.extras import RealDictCursor
-import os
+import logging
 
 app = Flask(__name__)
-
-# Database Connection
-DB_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/mt4db")
-
-# Logger Configuration
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
-# Connect to Database
-def get_db_connection():
-    return psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+DATABASE_URL = "your_database_url_here"  # Replace with your actual database URL
 
-# 🔵 Receive Data from MT4 EA
+# Function to get a database connection
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+# Ensure all required columns exist
+def ensure_columns_exist():
+    """Ensures new columns exist in the database."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute("""
+        ALTER TABLE accounts 
+        ADD COLUMN IF NOT EXISTS broker TEXT DEFAULT 'Unknown Broker',
+        ADD COLUMN IF NOT EXISTS open_charts INT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS ea_names TEXT DEFAULT '',
+        ADD COLUMN IF NOT EXISTS traded_pairs TEXT DEFAULT '',
+        ADD COLUMN IF NOT EXISTS deposit_withdrawal FLOAT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS margin_percent FLOAT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS realized_pl_daily FLOAT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS realized_pl_weekly FLOAT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS realized_pl_monthly FLOAT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS realized_pl_yearly FLOAT DEFAULT 0;
+        """)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Database Column Update Error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
+    """Receives and processes data from the MT4 EA."""
     try:
+        ensure_columns_exist()  # Ensure columns exist before inserting data
+        
         raw_data = request.get_data(as_text=True)
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
@@ -28,7 +52,7 @@ def receive_mt4_data():
         if not data:
             return jsonify({"error": "Invalid JSON format"}), 400
 
-        # Extract Fields
+        # Extract fields
         broker = data.get("broker", "Unknown Broker")
         account_number = data["account_number"]
         balance = data["balance"]
@@ -45,7 +69,7 @@ def receive_mt4_data():
         realized_pl_monthly = data.get("realized_pl_monthly", 0.0)
         realized_pl_yearly = data.get("realized_pl_yearly", 0.0)
 
-        # Store Data in Database
+        # Store data in database
         conn = get_db_connection()
         cur = conn.cursor()
 
@@ -87,24 +111,27 @@ def receive_mt4_data():
         logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# 🔵 Fetch Account Data for Dashboard
+
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
+    """Fetches all account data."""
     try:
+        ensure_columns_exist()  # Ensure columns exist
+
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        query = """
-        SELECT broker, account_number, balance, equity, free_margin, profit_loss,
-               open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent,
-               realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly
-        FROM accounts ORDER BY profit_loss ASC;
-        """
-        cur.execute(query)
-        accounts = cur.fetchall()
-        
-        cur.close()
-        conn.close()
+        cur.execute("SELECT * FROM accounts;")
+        rows = cur.fetchall()
+
+        accounts = []
+        for row in rows:
+            accounts.append({
+                "broker": row[0], "account_number": row[1], "balance": row[2], "equity": row[3],
+                "free_margin": row[4], "profit_loss": row[5], "open_charts": row[6], "ea_names": row[7],
+                "traded_pairs": row[8], "deposit_withdrawal": row[9], "margin_percent": row[10],
+                "realized_pl_daily": row[11], "realized_pl_weekly": row[12], "realized_pl_monthly": row[13],
+                "realized_pl_yearly": row[14]
+            })
 
         return jsonify({"accounts": accounts}), 200
 
@@ -113,4 +140,4 @@ def get_accounts():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
