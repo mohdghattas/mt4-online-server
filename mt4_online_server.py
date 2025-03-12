@@ -34,7 +34,9 @@ def ensure_column_exists():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = request.get_json()
+        # ✅ Force JSON Parsing Regardless of Content-Type
+        raw_data = request.get_json(force=True)
+        
         if not raw_data:
             return jsonify({"error": "Invalid JSON format"}), 400
 
@@ -52,11 +54,9 @@ def receive_mt4_data():
         realized_pl_monthly = raw_data["realized_pl_monthly"]
         realized_pl_yearly = raw_data["realized_pl_yearly"]
 
-        # Fix Incorrect Data
-        if balance is None or equity is None:
-            return jsonify({"error": "Missing required account data"}), 400
-
-        # Insert or Update Data
+        # ✅ Insert/Update Database
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute(""" UPDATE accounts SET
                         balance = %s, equity = %s, free_margin = %s, profit_loss = %s,
                         realized_pl_daily = %s, realized_pl_weekly = %s,
@@ -65,6 +65,9 @@ def receive_mt4_data():
                     (balance, equity, free_margin, profit_loss, realized_pl_daily,
                      realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, account_number))
         conn.commit()
+        cur.close()
+        conn.close()
+
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
