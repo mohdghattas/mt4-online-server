@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # ✅ Enable CORS for cross-origin requests
+from flask_cors import CORS  # ✅ Import CORS
 import psycopg2
 import logging
 import os
@@ -7,7 +7,7 @@ import json
 
 # ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # ✅ Allow all origins
+CORS(app)  # ✅ Allow API access from external sources
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -30,7 +30,7 @@ def ensure_column_exists():
             "realized_pl_weekly FLOAT",
             "realized_pl_monthly FLOAT",
             "realized_pl_yearly FLOAT",
-            "floating_pl FLOAT"
+            "profit_loss FLOAT"  # This was originally working
         ]
         for col in columns:
             cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
@@ -54,7 +54,7 @@ def receive_mt4_data():
             logger.error(f"Invalid Content-Type: {request.content_type}")
             return jsonify({"error": "Content-Type must be application/json"}), 415
 
-        # ✅ Parse JSON data safely
+        # ✅ Parse JSON data
         try:
             json_data = json.loads(raw_data)
         except json.JSONDecodeError as e:
@@ -66,7 +66,7 @@ def receive_mt4_data():
             logger.error("❌ Missing account_number field")
             return jsonify({"error": "account_number is required"}), 400
 
-        # ✅ Extract data fields
+        # ✅ Extract Data
         broker = json_data.get("broker", "Unknown")
         account_number = json_data["account_number"]
         balance = json_data.get("balance", 0.0)
@@ -74,7 +74,7 @@ def receive_mt4_data():
         margin_used = json_data.get("margin_used", 0.0)
         free_margin = json_data.get("free_margin", 0.0)
         margin_percent = json_data.get("margin_percent", 0.0)
-        floating_pl = json_data.get("floating_pl", 0.0)
+        profit_loss = json_data.get("profit_loss", 0.0)
         realized_pl_daily = json_data.get("realized_pl_daily", 0.0)
         realized_pl_weekly = json_data.get("realized_pl_weekly", 0.0)
         realized_pl_monthly = json_data.get("realized_pl_monthly", 0.0)
@@ -88,7 +88,7 @@ def receive_mt4_data():
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
-                margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
+                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
                 realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE 
@@ -98,7 +98,7 @@ def receive_mt4_data():
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_percent = EXCLUDED.margin_percent,
-                floating_pl = EXCLUDED.floating_pl,
+                profit_loss = EXCLUDED.profit_loss,
                 realized_pl_daily = EXCLUDED.realized_pl_daily,
                 realized_pl_weekly = EXCLUDED.realized_pl_weekly,
                 realized_pl_monthly = EXCLUDED.realized_pl_monthly,
@@ -107,7 +107,7 @@ def receive_mt4_data():
                 open_trades = EXCLUDED.open_trades;
         """, (
             broker, account_number, balance, equity, margin_used, free_margin,
-            margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
+            margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
             realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
         ))
         conn.commit()
@@ -129,10 +129,10 @@ def get_accounts():
         cur = conn.cursor()
         cur.execute("""
             SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
+                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
                    realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             FROM accounts 
-            ORDER BY floating_pl DESC;
+            ORDER BY profit_loss DESC;
         """)
         accounts = cur.fetchall()
         cur.close()
@@ -146,7 +146,7 @@ def get_accounts():
             "margin_used": row[4],
             "free_margin": row[5],
             "margin_percent": row[6],
-            "floating_pl": row[7],
+            "profit_loss": row[7],
             "realized_pl_daily": row[8],
             "realized_pl_weekly": row[9],
             "realized_pl_monthly": row[10],
