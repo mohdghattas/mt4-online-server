@@ -11,35 +11,38 @@ logger = logging.getLogger("mt4_online_server")
 
 # Database connection function
 def get_db_connection():
-    return psycopg2.connect(
-        os.getenv("DATABASE_URL"),
-        sslmode="require"
-    )
+    return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
 # Ensure all required columns exist
 def ensure_column_exists():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        columns = [
-            "open_charts INT",
-            "ea_names TEXT",
-            "traded_pairs TEXT",
-            "deposit_withdrawal FLOAT",
-            "margin_percent FLOAT",
-            "realized_pl_daily FLOAT",
-            "realized_pl_weekly FLOAT",
-            "realized_pl_monthly FLOAT",
-            "realized_pl_yearly FLOAT"
-        ]
-        for col in columns:
-            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_number BIGINT PRIMARY KEY,
+                broker TEXT DEFAULT 'Unknown',
+                balance FLOAT DEFAULT 0.0,
+                equity FLOAT DEFAULT 0.0,
+                free_margin FLOAT DEFAULT 0.0,
+                profit_loss FLOAT DEFAULT 0.0,
+                open_charts INT DEFAULT 0,
+                ea_names TEXT DEFAULT '',
+                traded_pairs TEXT DEFAULT '',
+                deposit_withdrawal FLOAT DEFAULT 0.0,
+                margin_percent FLOAT DEFAULT 0.0,
+                realized_pl_daily FLOAT DEFAULT 0.0,
+                realized_pl_weekly FLOAT DEFAULT 0.0,
+                realized_pl_monthly FLOAT DEFAULT 0.0,
+                realized_pl_yearly FLOAT DEFAULT 0.0
+            );
+        """)
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("✅ Database schema updated: Added missing columns if necessary.")
+        logger.info("✅ Database schema ensured successfully.")
     except Exception as e:
-        logger.error(f"❌ Database schema update error: {str(e)}")
+        logger.error(f"❌ Database schema error: {str(e)}")
 
 # API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
@@ -71,7 +74,7 @@ def receive_mt4_data():
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Insert or Update Data
+        # **Force Full Update**
         cur.execute("""
             INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss,
                                   open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent,
@@ -91,16 +94,18 @@ def receive_mt4_data():
                 realized_pl_daily = EXCLUDED.realized_pl_daily,
                 realized_pl_weekly = EXCLUDED.realized_pl_weekly,
                 realized_pl_monthly = EXCLUDED.realized_pl_monthly,
-                realized_pl_yearly = EXCLUDED.realized_pl_yearly;
+                realized_pl_yearly = EXCLUDED.realized_pl_yearly
+            RETURNING *;
         """, (broker, account_number, balance, equity, free_margin, profit_loss,
               open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent,
               realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly))
 
+        updated_row = cur.fetchone()
         conn.commit()
         cur.close()
         conn.close()
 
-        logger.info(f"✅ Data stored successfully: {raw_data}")
+        logger.info(f"✅ Data stored successfully: {updated_row}")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
@@ -113,26 +118,22 @@ def get_accounts():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("""
             SELECT broker, account_number, balance, equity, free_margin, profit_loss,
                    open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent,
                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly
-            FROM accounts
-            ORDER BY profit_loss ASC;
+            FROM accounts ORDER BY profit_loss ASC;
         """)
-
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
         accounts_data = [{
-            "broker": row[0], "account_number": row[1], "balance": row[2],
-            "equity": row[3], "free_margin": row[4], "profit_loss": row[5],
-            "open_charts": row[6], "ea_names": row[7], "traded_pairs": row[8],
-            "deposit_withdrawal": row[9], "margin_percent": row[10],
-            "realized_pl_daily": row[11], "realized_pl_weekly": row[12],
-            "realized_pl_monthly": row[13], "realized_pl_yearly": row[14]
+            "broker": row[0], "account_number": row[1], "balance": row[2], "equity": row[3],
+            "free_margin": row[4], "profit_loss": row[5], "open_charts": row[6], "ea_names": row[7],
+            "traded_pairs": row[8], "deposit_withdrawal": row[9], "margin_percent": row[10],
+            "realized_pl_daily": row[11], "realized_pl_weekly": row[12], "realized_pl_monthly": row[13],
+            "realized_pl_yearly": row[14]
         } for row in accounts]
 
         return jsonify({"accounts": accounts_data})
