@@ -8,7 +8,7 @@ import re
 
 # ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app)  # ✅ Enable CORS for dashboard access
+CORS(app)  # ✅ Allow dashboard access
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,11 +18,15 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Function to clean JSON input
-def clean_json(data):
-    """Remove unexpected trailing characters from JSON input."""
-    cleaned_data = re.sub(r'}\s*\Z', '}', data.strip())  # Fix unexpected endings
-    return cleaned_data
+# ✅ Function to clean and validate JSON input
+def clean_and_validate_json(data):
+    """Fix unexpected JSON format issues."""
+    try:
+        cleaned_data = re.sub(r'}\s*\Z', '}', data.strip())  # ✅ Remove trailing characters
+        return json.loads(cleaned_data)
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON Parsing Error: {str(e)}")
+        return None
 
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
@@ -30,19 +34,16 @@ def receive_mt4_data():
     try:
         # ✅ Log raw request data
         raw_data = request.data.decode("utf-8", errors="replace").strip()
-        cleaned_data = clean_json(raw_data)  # ✅ Remove extra trailing characters
-        logger.debug(f"📥 Cleaned Request Data: {cleaned_data}")
+        logger.debug(f"📥 Received Raw Data: {raw_data}")
 
         # ✅ Validate Content-Type
         if not request.is_json:
             logger.error(f"Invalid Content-Type: {request.content_type}")
             return jsonify({"error": "Content-Type must be application/json"}), 415
 
-        # ✅ Parse JSON data
-        try:
-            json_data = json.loads(cleaned_data)
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON Decoding Error: {str(e)}")
+        # ✅ Clean & Parse JSON
+        json_data = clean_and_validate_json(raw_data)
+        if json_data is None:
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Validate required fields
@@ -147,5 +148,4 @@ def get_accounts():
 
 # ✅ Initialize Database on Startup
 if __name__ == "__main__":
-    ensure_column_exists()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
