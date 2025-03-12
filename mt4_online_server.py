@@ -14,7 +14,7 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Ensure all necessary columns exist
+# ✅ Ensure necessary columns exist
 def ensure_column_exists():
     try:
         conn = get_db_connection()
@@ -33,7 +33,7 @@ def ensure_column_exists():
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("✅ Database schema updated: Added missing columns if they did not exist.")
+        logger.info("✅ Database schema updated.")
     except Exception as e:
         logger.error(f"❌ Database schema update error: {str(e)}")
 
@@ -41,7 +41,7 @@ def ensure_column_exists():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # 🔍 Log incoming request
+        # 🔍 Log raw request
         raw_data = request.data.decode("utf-8").strip()
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
@@ -51,7 +51,7 @@ def receive_mt4_data():
 
         # ✅ Decode JSON safely
         try:
-            json_data = json.loads(raw_data)
+            json_data = json.loads(raw_data)  # Ensure decoding
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
@@ -73,7 +73,7 @@ def receive_mt4_data():
         open_trades = json_data.get("open_trades", 0)
 
         # ✅ Log extracted values before inserting
-        logger.debug(f"Extracted Data: {json_data}")
+        logger.debug(f"✅ Extracted Data: {json_data}")
 
         # ✅ Connect to Database
         conn = get_db_connection()
