@@ -1,10 +1,13 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # ✅ Enable CORS for cross-origin requests
 import psycopg2
 import logging
 import os
 import json
 
+# ✅ Initialize Flask App
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # ✅ Allow all origins
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -14,50 +17,56 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Function to safely parse JSON
-def safe_json_parse(raw_data):
+# ✅ Ensure necessary database columns exist
+def ensure_column_exists():
     try:
-        # ✅ Strip unwanted characters
-        cleaned_data = raw_data.strip()
-
-        # ✅ Check for multiple JSON objects
-        if cleaned_data.count("{") != cleaned_data.count("}"):
-            raise json.JSONDecodeError("Unmatched JSON braces", cleaned_data, 0)
-
-        # ✅ Ensure there's no trailing data
-        if cleaned_data[-1] != "}":
-            cleaned_data = cleaned_data[:cleaned_data.rfind("}") + 1]
-
-        # ✅ Parse JSON
-        return json.loads(cleaned_data)
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ JSON Decoding Error: {str(e)}", exc_info=True)
-        return None
+        conn = get_db_connection()
+        cur = conn.cursor()
+        columns = [
+            "margin_used FLOAT",
+            "open_charts INT",
+            "open_trades INT",
+            "realized_pl_daily FLOAT",
+            "realized_pl_weekly FLOAT",
+            "realized_pl_monthly FLOAT",
+            "realized_pl_yearly FLOAT",
+            "floating_pl FLOAT"
+        ]
+        for col in columns:
+            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Database schema updated")
+    except Exception as e:
+        logger.error(f"❌ Database schema error: {str(e)}")
 
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # ✅ Get raw request data
-        raw_data = request.data.decode("utf-8", errors="replace").strip()
+        # ✅ Log raw request data
+        raw_data = request.data.decode("utf-8", errors="replace")
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
         # ✅ Validate Content-Type
-        if "application/json" not in request.content_type:
+        if not request.is_json:
             logger.error(f"Invalid Content-Type: {request.content_type}")
             return jsonify({"error": "Content-Type must be application/json"}), 415
 
-        # ✅ Attempt to parse JSON safely
-        json_data = safe_json_parse(raw_data)
-        if json_data is None:
+        # ✅ Parse JSON data safely
+        try:
+            json_data = json.loads(raw_data)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Validate required fields
         if "account_number" not in json_data:
-            logger.error("❌ Missing 'account_number' field in request")
+            logger.error("❌ Missing account_number field")
             return jsonify({"error": "account_number is required"}), 400
 
-        # ✅ Extract data safely
+        # ✅ Extract data fields
         broker = json_data.get("broker", "Unknown")
         account_number = json_data["account_number"]
         balance = json_data.get("balance", 0.0)
@@ -65,7 +74,7 @@ def receive_mt4_data():
         margin_used = json_data.get("margin_used", 0.0)
         free_margin = json_data.get("free_margin", 0.0)
         margin_percent = json_data.get("margin_percent", 0.0)
-        profit_loss = json_data.get("profit_loss", 0.0)
+        floating_pl = json_data.get("floating_pl", 0.0)
         realized_pl_daily = json_data.get("realized_pl_daily", 0.0)
         realized_pl_weekly = json_data.get("realized_pl_weekly", 0.0)
         realized_pl_monthly = json_data.get("realized_pl_monthly", 0.0)
@@ -73,17 +82,13 @@ def receive_mt4_data():
         open_charts = json_data.get("open_charts", 0)
         open_trades = json_data.get("open_trades", 0)
 
-        # ✅ Debugging Logs: Ensure values are being extracted correctly
-        logger.debug(f"✅ Extracted Data: {json_data}")
-
-        # ✅ Insert or Update Data in DB
+        # ✅ Database operations
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
-                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+                margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
                 realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE 
@@ -93,7 +98,7 @@ def receive_mt4_data():
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_percent = EXCLUDED.margin_percent,
-                profit_loss = EXCLUDED.profit_loss,
+                floating_pl = EXCLUDED.floating_pl,
                 realized_pl_daily = EXCLUDED.realized_pl_daily,
                 realized_pl_weekly = EXCLUDED.realized_pl_weekly,
                 realized_pl_monthly = EXCLUDED.realized_pl_monthly,
@@ -102,10 +107,9 @@ def receive_mt4_data():
                 open_trades = EXCLUDED.open_trades;
         """, (
             broker, account_number, balance, equity, margin_used, free_margin,
-            margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+            margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
             realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
         ))
-
         conn.commit()
         cur.close()
         conn.close()
@@ -125,26 +129,37 @@ def get_accounts():
         cur = conn.cursor()
         cur.execute("""
             SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+                   margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
                    realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             FROM accounts 
-            ORDER BY profit_loss DESC;
+            ORDER BY floating_pl DESC;
         """)
         accounts = cur.fetchall()
         cur.close()
         conn.close()
 
-        accounts_data = [dict(zip(
-            ["broker", "account_number", "balance", "equity", "margin_used", "free_margin",
-             "margin_percent", "profit_loss", "realized_pl_daily", "realized_pl_weekly",
-             "realized_pl_monthly", "realized_pl_yearly", "open_charts", "open_trades"], row
-        )) for row in accounts]
+        accounts_data = [{
+            "broker": row[0],
+            "account_number": row[1],
+            "balance": row[2],
+            "equity": row[3],
+            "margin_used": row[4],
+            "free_margin": row[5],
+            "margin_percent": row[6],
+            "floating_pl": row[7],
+            "realized_pl_daily": row[8],
+            "realized_pl_weekly": row[9],
+            "realized_pl_monthly": row[10],
+            "realized_pl_yearly": row[11],
+            "open_charts": row[12],
+            "open_trades": row[13]
+        } for row in accounts]
 
         return jsonify({"accounts": accounts_data})
 
     except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"❌ API Fetch Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 # ✅ Initialize Database on Startup
 if __name__ == "__main__":
