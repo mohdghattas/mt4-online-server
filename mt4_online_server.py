@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import psycopg2
 import logging
 import os
+import json
 
 app = Flask(__name__)
 
@@ -41,16 +42,18 @@ def ensure_column_exists():
 def receive_mt4_data():
     try:
         # 🔍 Log incoming request
-        raw_data = request.data.decode("utf-8")
+        raw_data = request.data.decode("utf-8").strip()
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
         # ✅ Ensure Content-Type is JSON
         if "application/json" not in request.content_type:
             return jsonify({"error": "Invalid Content-Type"}), 415
 
-        # ✅ Parse JSON safely
-        json_data = request.get_json()
-        if not json_data:
+        # ✅ Decode JSON safely
+        try:
+            json_data = json.loads(raw_data)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Extract Data with Default Values
