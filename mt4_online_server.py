@@ -4,11 +4,9 @@ import psycopg2
 import logging
 import os
 import json
-import re
 
-# ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app)  # ✅ Allow dashboard access
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow CORS for frontend
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -18,32 +16,19 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Function to clean and validate JSON input
-def clean_and_validate_json(data):
-    """Fix unexpected JSON format issues."""
-    try:
-        cleaned_data = re.sub(r'}\s*\Z', '}', data.strip())  # ✅ Remove trailing characters
-        return json.loads(cleaned_data)
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ JSON Parsing Error: {str(e)}")
-        return None
-
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         # ✅ Log raw request data
-        raw_data = request.data.decode("utf-8", errors="replace").strip()
-        logger.debug(f"📥 Received Raw Data: {raw_data}")
+        raw_data = request.get_data(as_text=True).strip()
+        logger.debug(f"📥 Cleaned Request Data: {raw_data}")
 
-        # ✅ Validate Content-Type
-        if not request.is_json:
-            logger.error(f"Invalid Content-Type: {request.content_type}")
-            return jsonify({"error": "Content-Type must be application/json"}), 415
-
-        # ✅ Clean & Parse JSON
-        json_data = clean_and_validate_json(raw_data)
-        if json_data is None:
+        # ✅ Ensure it's valid JSON
+        try:
+            json_data = json.loads(raw_data)
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Validate required fields
@@ -95,6 +80,7 @@ def receive_mt4_data():
             margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
             realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
         ))
+
         conn.commit()
         cur.close()
         conn.close()
@@ -146,6 +132,6 @@ def get_accounts():
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ Initialize Database on Startup
+# ✅ Run Flask Server
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
