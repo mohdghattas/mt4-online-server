@@ -34,42 +34,40 @@ def ensure_column_exists():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        if request.content_type != "application/json":
-            return jsonify({"error": "Unsupported Media Type: Content-Type must be application/json"}), 415
-
         raw_data = request.get_json()
         if not raw_data:
             return jsonify({"error": "Invalid JSON format"}), 400
 
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        conn = get_db_connection()
-        cur = conn.cursor()
+        # Extract Data
+        broker = raw_data.get("broker", "Unknown")
+        account_number = raw_data["account_number"]
+        balance = raw_data["balance"]
+        equity = raw_data["equity"]
+        free_margin = raw_data["free_margin"]
+        profit_loss = raw_data["profit_loss"]
+        realized_pl_daily = raw_data["realized_pl_daily"]
+        realized_pl_weekly = raw_data["realized_pl_weekly"]
+        realized_pl_monthly = raw_data["realized_pl_monthly"]
+        realized_pl_yearly = raw_data["realized_pl_yearly"]
 
-        cur.execute("""
-            INSERT INTO accounts (broker, account_number, balance, equity, free_margin, profit_loss, 
-                                 open_charts, ea_names, traded_pairs, deposit_withdrawal, margin_percent, 
-                                 realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (account_number) DO UPDATE 
-            SET broker = EXCLUDED.broker, balance = EXCLUDED.balance, equity = EXCLUDED.equity, 
-                free_margin = EXCLUDED.free_margin, profit_loss = EXCLUDED.profit_loss, 
-                open_charts = EXCLUDED.open_charts, ea_names = EXCLUDED.ea_names, 
-                traded_pairs = EXCLUDED.traded_pairs, deposit_withdrawal = EXCLUDED.deposit_withdrawal, 
-                margin_percent = EXCLUDED.margin_percent, realized_pl_daily = EXCLUDED.realized_pl_daily, 
-                realized_pl_weekly = EXCLUDED.realized_pl_weekly, realized_pl_monthly = EXCLUDED.realized_pl_monthly, 
-                realized_pl_yearly = EXCLUDED.realized_pl_yearly;
-        """, tuple(raw_data.values()))
+        # Fix Incorrect Data
+        if balance is None or equity is None:
+            return jsonify({"error": "Missing required account data"}), 400
 
+        # Insert or Update Data
+        cur.execute(""" UPDATE accounts SET
+                        balance = %s, equity = %s, free_margin = %s, profit_loss = %s,
+                        realized_pl_daily = %s, realized_pl_weekly = %s,
+                        realized_pl_monthly = %s, realized_pl_yearly = %s
+                        WHERE account_number = %s""",
+                    (balance, equity, free_margin, profit_loss, realized_pl_daily,
+                     realized_pl_weekly, realized_pl_monthly, realized_pl_yearly, account_number))
         conn.commit()
-        cur.close()
-        conn.close()
-
-        logger.info(f"✅ Data stored successfully: {raw_data}")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 # Retrieve Data
