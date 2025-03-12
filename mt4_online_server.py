@@ -1,25 +1,33 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # ✅ Enable CORS for cross-origin requests
 import psycopg2
 import logging
 import os
 import json
 
+# ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow frontend access
+CORS(app)  # ✅ Allow API access from external origins
 
-# ✅ Setup logging
+# ✅ Setup logging for debugging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
-# ✅ Database connection function
+# ✅ Database Connection Function
 def get_db_connection():
-    return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
+        return conn
+    except Exception as e:
+        logger.error(f"❌ Database Connection Error: {str(e)}")
+        return None
 
-# ✅ Ensure database schema integrity
-def ensure_columns():
+# ✅ Ensure All Necessary Columns Exist in Database
+def ensure_column_exists():
     try:
         conn = get_db_connection()
+        if conn is None:
+            return
         cur = conn.cursor()
         columns = [
             "margin_used FLOAT",
@@ -29,7 +37,7 @@ def ensure_columns():
             "realized_pl_weekly FLOAT",
             "realized_pl_monthly FLOAT",
             "realized_pl_yearly FLOAT",
-            "profit_loss FLOAT"
+            "floating_pl FLOAT"  # Previously "profit_loss"
         ]
         for col in columns:
             cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
@@ -38,39 +46,50 @@ def ensure_columns():
         conn.close()
         logger.info("✅ Database schema updated successfully")
     except Exception as e:
-        logger.error(f"❌ Database schema error: {str(e)}")
+        logger.error(f"❌ Database Schema Error: {str(e)}")
 
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # ✅ Read and decode request data
+        # ✅ Read and sanitize raw request data
         raw_data = request.data.decode("utf-8", errors="replace").strip()
-        logger.debug(f"📥 Cleaned Request Data: {raw_data}")
+        logger.debug(f"📥 Raw Request Data: {repr(raw_data)}")  # Logs actual received JSON
 
-        # ✅ Validate JSON structure
+        # ✅ Check if request contains JSON data
+        if not request.is_json:
+            logger.error(f"❌ Invalid Content-Type: {request.content_type}")
+            return jsonify({"error": "Content-Type must be application/json"}), 415
+
+        # ✅ Detect multiple JSON objects in one request
+        if raw_data.count("{") > 1:
+            logger.error(f"❌ JSON Decoding Error: Multiple JSON objects detected in request!")
+            return jsonify({"error": "Multiple JSON objects detected. Wrap data in an array []"}), 400
+
+        # ✅ Parse JSON safely
         try:
             json_data = json.loads(raw_data)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Decoding Error: {str(e)}")
-            return jsonify({"error": "Invalid JSON format"}), 400
+            return jsonify({"error": "Invalid JSON format. Ensure proper structure."}), 400
 
-        # ✅ Ensure required fields exist
-        required_fields = ["account_number", "broker", "balance", "equity", "margin_used"]
-        for field in required_fields:
-            if field not in json_data:
-                logger.error(f"❌ Missing field: {field}")
-                return jsonify({"error": f"Missing field: {field}"}), 400
+        # ✅ Validate required fields
+        required_fields = ["account_number", "broker", "balance", "equity", "margin_used", "free_margin", "margin_percent", "floating_pl"]
+        missing_fields = [field for field in required_fields if field not in json_data]
 
-        # ✅ Extract data
-        broker = json_data["broker"]
+        if missing_fields:
+            logger.error(f"❌ Missing required fields: {missing_fields}")
+            return jsonify({"error": f"Missing required fields: {missing_fields}"}), 400
+
+        # ✅ Extract data fields
+        broker = json_data.get("broker", "Unknown")
         account_number = json_data["account_number"]
-        balance = json_data["balance"]
-        equity = json_data["equity"]
-        margin_used = json_data["margin_used"]
+        balance = json_data.get("balance", 0.0)
+        equity = json_data.get("equity", 0.0)
+        margin_used = json_data.get("margin_used", 0.0)
         free_margin = json_data.get("free_margin", 0.0)
         margin_percent = json_data.get("margin_percent", 0.0)
-        profit_loss = json_data.get("profit_loss", 0.0)
+        floating_pl = json_data.get("floating_pl", 0.0)
         realized_pl_daily = json_data.get("realized_pl_daily", 0.0)
         realized_pl_weekly = json_data.get("realized_pl_weekly", 0.0)
         realized_pl_monthly = json_data.get("realized_pl_monthly", 0.0)
@@ -78,13 +97,16 @@ def receive_mt4_data():
         open_charts = json_data.get("open_charts", 0)
         open_trades = json_data.get("open_trades", 0)
 
-        # ✅ Database update
+        # ✅ Insert or Update Database
         conn = get_db_connection()
+        if conn is None:
+            return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
+
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
-                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+                margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
                 realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE 
@@ -94,7 +116,7 @@ def receive_mt4_data():
                 margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_percent = EXCLUDED.margin_percent,
-                profit_loss = EXCLUDED.profit_loss,
+                floating_pl = EXCLUDED.floating_pl,
                 realized_pl_daily = EXCLUDED.realized_pl_daily,
                 realized_pl_weekly = EXCLUDED.realized_pl_weekly,
                 realized_pl_monthly = EXCLUDED.realized_pl_monthly,
@@ -103,7 +125,7 @@ def receive_mt4_data():
                 open_trades = EXCLUDED.open_trades;
         """, (
             broker, account_number, balance, equity, margin_used, free_margin,
-            margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+            margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
             realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
         ))
 
@@ -123,13 +145,15 @@ def receive_mt4_data():
 def get_accounts():
     try:
         conn = get_db_connection()
+        if conn is None:
+            return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("""
             SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+                   margin_percent, floating_pl, realized_pl_daily, realized_pl_weekly,
                    realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
             FROM accounts 
-            ORDER BY profit_loss DESC;
+            ORDER BY floating_pl DESC;
         """)
         accounts = cur.fetchall()
         cur.close()
@@ -143,7 +167,7 @@ def get_accounts():
             "margin_used": row[4],
             "free_margin": row[5],
             "margin_percent": row[6],
-            "profit_loss": row[7],
+            "floating_pl": row[7],
             "realized_pl_daily": row[8],
             "realized_pl_weekly": row[9],
             "realized_pl_monthly": row[10],
@@ -160,5 +184,5 @@ def get_accounts():
 
 # ✅ Initialize Database on Startup
 if __name__ == "__main__":
-    ensure_columns()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    ensure_column_exists()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
