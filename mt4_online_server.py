@@ -3,7 +3,6 @@ import psycopg2
 import logging
 import os
 import json
-import re
 
 app = Flask(__name__)
 
@@ -15,51 +14,31 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Function to validate and parse JSON safely
+# ✅ Function to safely parse JSON
 def safe_json_parse(raw_data):
     try:
-        # Remove any unexpected characters
+        # ✅ Strip unwanted characters
         cleaned_data = raw_data.strip()
 
-        # Ensure there is only one JSON object in the request (fix for 'Extra Data' error)
+        # ✅ Check for multiple JSON objects
         if cleaned_data.count("{") != cleaned_data.count("}"):
-            raise json.JSONDecodeError("Unmatched braces in JSON", cleaned_data, 0)
+            raise json.JSONDecodeError("Unmatched JSON braces", cleaned_data, 0)
 
-        # Validate JSON format
+        # ✅ Ensure there's no trailing data
+        if cleaned_data[-1] != "}":
+            cleaned_data = cleaned_data[:cleaned_data.rfind("}") + 1]
+
+        # ✅ Parse JSON
         return json.loads(cleaned_data)
     except json.JSONDecodeError as e:
         logger.error(f"❌ JSON Decoding Error: {str(e)}", exc_info=True)
         return None
 
-# ✅ Ensure all necessary columns exist
-def ensure_column_exists():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        columns = [
-            "margin_used FLOAT",
-            "open_charts INT",
-            "open_trades INT",
-            "realized_pl_daily FLOAT",
-            "realized_pl_weekly FLOAT",
-            "realized_pl_monthly FLOAT",
-            "realized_pl_yearly FLOAT",
-            "profit_loss FLOAT"
-        ]
-        for col in columns:
-            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Database schema updated successfully.")
-    except Exception as e:
-        logger.error(f"❌ Database schema update error: {str(e)}", exc_info=True)
-
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # Log raw request data
+        # ✅ Get raw request data
         raw_data = request.data.decode("utf-8", errors="replace").strip()
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
@@ -78,7 +57,7 @@ def receive_mt4_data():
             logger.error("❌ Missing 'account_number' field in request")
             return jsonify({"error": "account_number is required"}), 400
 
-        # ✅ Extract data safely with default values
+        # ✅ Extract data safely
         broker = json_data.get("broker", "Unknown")
         account_number = json_data["account_number"]
         balance = json_data.get("balance", 0.0)
