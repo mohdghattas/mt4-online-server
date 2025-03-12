@@ -3,6 +3,7 @@ import psycopg2
 import logging
 import os
 import json
+import re
 
 app = Flask(__name__)
 
@@ -14,7 +15,23 @@ logger = logging.getLogger("mt4_online_server")
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Ensure all necessary columns exist (Updated field names for consistency)
+# ✅ Function to validate and parse JSON safely
+def safe_json_parse(raw_data):
+    try:
+        # Remove any unexpected characters
+        cleaned_data = raw_data.strip()
+
+        # Ensure there is only one JSON object in the request (fix for 'Extra Data' error)
+        if cleaned_data.count("{") != cleaned_data.count("}"):
+            raise json.JSONDecodeError("Unmatched braces in JSON", cleaned_data, 0)
+
+        # Validate JSON format
+        return json.loads(cleaned_data)
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON Decoding Error: {str(e)}", exc_info=True)
+        return None
+
+# ✅ Ensure all necessary columns exist
 def ensure_column_exists():
     try:
         conn = get_db_connection()
@@ -27,7 +44,7 @@ def ensure_column_exists():
             "realized_pl_weekly FLOAT",
             "realized_pl_monthly FLOAT",
             "realized_pl_yearly FLOAT",
-            "profit_loss FLOAT"  # Standardized to match the field used in EA
+            "profit_loss FLOAT"
         ]
         for col in columns:
             cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
@@ -43,7 +60,7 @@ def ensure_column_exists():
 def receive_mt4_data():
     try:
         # Log raw request data
-        raw_data = request.data.decode("utf-8").strip()
+        raw_data = request.data.decode("utf-8", errors="replace").strip()
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
         # ✅ Validate Content-Type
@@ -51,11 +68,9 @@ def receive_mt4_data():
             logger.error(f"Invalid Content-Type: {request.content_type}")
             return jsonify({"error": "Content-Type must be application/json"}), 415
 
-        # ✅ Safely parse JSON data
-        try:
-            json_data = json.loads(raw_data)  # Decode JSON correctly
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON Decoding Error: {str(e)}", exc_info=True)
+        # ✅ Attempt to parse JSON safely
+        json_data = safe_json_parse(raw_data)
+        if json_data is None:
             return jsonify({"error": "Invalid JSON format"}), 400
 
         # ✅ Validate required fields
@@ -63,7 +78,7 @@ def receive_mt4_data():
             logger.error("❌ Missing 'account_number' field in request")
             return jsonify({"error": "account_number is required"}), 400
 
-        # ✅ Extract data (with safe defaults)
+        # ✅ Extract data safely with default values
         broker = json_data.get("broker", "Unknown")
         account_number = json_data["account_number"]
         balance = json_data.get("balance", 0.0)
@@ -71,7 +86,7 @@ def receive_mt4_data():
         margin_used = json_data.get("margin_used", 0.0)
         free_margin = json_data.get("free_margin", 0.0)
         margin_percent = json_data.get("margin_percent", 0.0)
-        profit_loss = json_data.get("profit_loss", 0.0)  # Standardized name
+        profit_loss = json_data.get("profit_loss", 0.0)
         realized_pl_daily = json_data.get("realized_pl_daily", 0.0)
         realized_pl_weekly = json_data.get("realized_pl_weekly", 0.0)
         realized_pl_monthly = json_data.get("realized_pl_monthly", 0.0)
