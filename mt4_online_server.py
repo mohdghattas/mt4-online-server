@@ -59,17 +59,25 @@ def receive_mt4_data():
         raw_data = request.get_data(as_text=True)
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        data = request.get_json()
-        if not data:
+        try:
+            data = request.get_json()
+        except Exception as e:
+            logger.error(f"❌ JSON Decoding Error: {str(e)}")
             return jsonify({"error": "Invalid JSON format"}), 400
 
-        # Extract fields
+        if not data:
+            return jsonify({"error": "Received empty JSON data"}), 400
+
+        # ✅ Debugging: Print parsed data
+        logger.debug(f"✅ Parsed JSON Data: {data}")
+
+        # Extract fields safely
         broker = data.get("broker", "Unknown Broker")
-        account_number = data["account_number"]
-        balance = data["balance"]
-        equity = data["equity"]
-        free_margin = data["free_margin"]
-        profit_loss = data["profit_loss"]
+        account_number = data.get("account_number")
+        balance = data.get("balance")
+        equity = data.get("equity")
+        free_margin = data.get("free_margin")
+        profit_loss = data.get("profit_loss")
         open_charts = data.get("open_charts", 0)
         ea_names = data.get("ea_names", "")
         traded_pairs = data.get("traded_pairs", "")
@@ -80,7 +88,34 @@ def receive_mt4_data():
         realized_pl_monthly = data.get("realized_pl_monthly", 0.0)
         realized_pl_yearly = data.get("realized_pl_yearly", 0.0)
 
-        # Store data in database
+        # ✅ Debugging: Check Data Types
+        logger.debug(f"📊 Data Types: {type(account_number)}, {type(balance)}, {type(equity)}, {type(profit_loss)}")
+
+        # ✅ Check if required fields are missing
+        required_fields = ["account_number", "balance", "equity", "profit_loss"]
+        for field in required_fields:
+            if data.get(field) is None:
+                logger.error(f"❌ Missing required field: {field}")
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # ✅ Ensure all numeric values are properly formatted
+        try:
+            account_number = int(account_number)
+            balance = float(balance)
+            equity = float(equity)
+            free_margin = float(free_margin)
+            profit_loss = float(profit_loss)
+            deposit_withdrawal = float(deposit_withdrawal)
+            margin_percent = float(margin_percent)
+            realized_pl_daily = float(realized_pl_daily)
+            realized_pl_weekly = float(realized_pl_weekly)
+            realized_pl_monthly = float(realized_pl_monthly)
+            realized_pl_yearly = float(realized_pl_yearly)
+        except ValueError as e:
+            logger.error(f"❌ Data Conversion Error: {str(e)}")
+            return jsonify({"error": "Data type conversion error"}), 400
+
+        # ✅ Insert data into database
         cur = conn.cursor()
         query = """
         INSERT INTO accounts (
@@ -119,6 +154,7 @@ def receive_mt4_data():
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/api/accounts", methods=["GET"])
