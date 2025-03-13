@@ -4,10 +4,11 @@ import psycopg2
 import logging
 import os
 import json
+import re
 
 # ✅ Initialize Flask App
 app = Flask(__name__)
-CORS(app)  # ✅ Allow API access from external origins
+CORS(app)  # ✅ Allow external API access
 
 # ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -22,40 +23,26 @@ def get_db_connection():
         logger.error(f"❌ Database Connection Error: {str(e)}")
         return None
 
-# ✅ Ensure database schema is correct
-def ensure_column_exists():
+# ✅ Function to clean and validate JSON
+def clean_json(raw_data):
     try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        
-        cur = conn.cursor()
-        columns = [
-            "margin_used FLOAT",
-            "open_charts INT",
-            "open_trades INT",
-            "realized_pl_daily FLOAT",
-            "realized_pl_weekly FLOAT",
-            "realized_pl_monthly FLOAT",
-            "realized_pl_yearly FLOAT",
-            "profit_loss FLOAT"  # Renamed from floating_pl
-        ]
-        for col in columns:
-            cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {col};")
+        # 🔹 Remove any null bytes (\u0000) and extra spaces
+        cleaned_data = raw_data.replace("\u0000", "").strip()
 
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Database schema updated successfully.")
-    except Exception as e:
-        logger.error(f"❌ Database Schema Error: {str(e)}")
+        # 🔹 Ensure it's a valid JSON
+        json_data = json.loads(cleaned_data)
 
-# ✅ API: Receive Data from MT4 EA
+        return json_data, None  # Return parsed JSON and no error
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON Parsing Error: {str(e)}")
+        return None, str(e)  # Return None and the error message
+
+# ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         # ✅ Log raw request data
-        raw_data = request.data.decode("utf-8", errors="replace").strip()
+        raw_data = request.data.decode("utf-8", errors="replace")
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
         # ✅ Validate Content-Type
@@ -63,12 +50,10 @@ def receive_mt4_data():
             logger.error(f"❌ Invalid Content-Type: {request.content_type}")
             return jsonify({"error": "Content-Type must be application/json"}), 415
 
-        # ✅ Parse JSON safely
-        try:
-            json_data = json.loads(raw_data)
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON Parsing Error: {str(e)}")
-            return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
+        # ✅ Clean JSON data
+        json_data, error = clean_json(raw_data)
+        if error:
+            return jsonify({"error": f"Invalid JSON format: {error}"}), 400
 
         # ✅ Validate required fields
         required_fields = [
@@ -77,7 +62,6 @@ def receive_mt4_data():
             "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
             "open_charts", "open_trades"
         ]
-
         for field in required_fields:
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
