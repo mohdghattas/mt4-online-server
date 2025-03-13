@@ -55,7 +55,7 @@ def ensure_column_exists():
 def receive_mt4_data():
     try:
         # ✅ Log raw request data
-        raw_data = request.data.decode("utf-8", errors="replace")
+        raw_data = request.data.decode("utf-8", errors="replace").strip()
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
         # ✅ Validate Content-Type
@@ -68,7 +68,7 @@ def receive_mt4_data():
             json_data = json.loads(raw_data)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Parsing Error: {str(e)}")
-            return jsonify({"error": "Invalid JSON format"}), 400
+            return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
 
         # ✅ Validate required fields
         required_fields = [
@@ -175,6 +175,12 @@ def get_accounts():
     except Exception as e:
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+# ✅ 404 Handler
+@app.errorhandler(404)
+def not_found(error):
+    logger.error("❌ 404 Not Found: The requested URL does not exist.")
+    return jsonify({"error": "404 Not Found"}), 404
 
 # ✅ Initialize Database on Startup
 if __name__ == "__main__":
