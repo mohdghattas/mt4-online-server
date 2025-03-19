@@ -6,7 +6,7 @@ import os
 import json
 import re
 
-# Initialize Flask Apps
+# Initialize Flask App
 app = Flask(__name__)
 CORS(app)
 
