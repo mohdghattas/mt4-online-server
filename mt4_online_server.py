@@ -4,7 +4,6 @@ import psycopg2
 import logging
 import os
 import json
-import re
 
 # ✅ Initialize Flask App
 app = Flask(__name__)
@@ -23,67 +22,28 @@ def get_db_connection():
         logger.error(f"❌ Database Connection Error: {str(e)}")
         return None
 
-# ✅ Function to clean and validate JSON
-def clean_json(raw_data):
-    try:
-        # 🔹 Remove any null bytes (\u0000) and extra spaces
-        cleaned_data = raw_data.replace("\u0000", "").strip()
-
-        # 🔹 Ensure it's a valid JSON
-        json_data = json.loads(cleaned_data)
-
-        return json_data, None  # Return parsed JSON and no error
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ JSON Parsing Error: {str(e)}")
-        return None, str(e)  # Return None and the error message
-
 # ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        # ✅ Log raw request data
-        raw_data = request.data.decode("utf-8", errors="replace")
-        logger.debug(f"📥 Raw Request Data: {raw_data}")
+        data = request.json
+        logger.debug(f"📥 Incoming Data: {data}")
 
-        # ✅ Validate Content-Type
-        if not request.is_json:
-            logger.error(f"❌ Invalid Content-Type: {request.content_type}")
-            return jsonify({"error": "Content-Type must be application/json"}), 415
-
-        # ✅ Clean JSON data
-        json_data, error = clean_json(raw_data)
-        if error:
-            return jsonify({"error": f"Invalid JSON format: {error}"}), 400
-
-        # ✅ Validate required fields
         required_fields = [
-            "broker", "account_number", "balance", "equity", "margin_used",
-            "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
-            "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
-            "open_charts", "open_trades"
+            "broker", "account_number", "balance", "equity", "margin_used", "free_margin",
+            "margin_percent", "profit_loss", "realized_pl_daily", "realized_pl_weekly",
+            "realized_pl_monthly", "realized_pl_yearly", "open_charts", "open_trades",
+            "autotrading_status", "ea_status", "terminal_errors", "empty_charts_count",
+            "empty_charts_symbols", "open_pairs_charts", "deposits_today", "withdrawals_today",
+            "deposits_weekly", "withdrawals_weekly", "deposits_monthly", "withdrawals_monthly",
+            "deposits_yearly", "withdrawals_yearly", "deposits_all_time", "withdrawals_all_time"
         ]
+
         for field in required_fields:
-            if field not in json_data:
+            if field not in data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
 
-        # ✅ Extract Data
-        broker = json_data["broker"]
-        account_number = json_data["account_number"]
-        balance = json_data["balance"]
-        equity = json_data["equity"]
-        margin_used = json_data["margin_used"]
-        free_margin = json_data["free_margin"]
-        margin_percent = json_data["margin_percent"]
-        profit_loss = json_data["profit_loss"]
-        realized_pl_daily = json_data["realized_pl_daily"]
-        realized_pl_weekly = json_data["realized_pl_weekly"]
-        realized_pl_monthly = json_data["realized_pl_monthly"]
-        realized_pl_yearly = json_data["realized_pl_yearly"]
-        open_charts = json_data["open_charts"]
-        open_trades = json_data["open_trades"]
-
-        # ✅ Insert Data into Database
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -93,8 +53,12 @@ def receive_mt4_data():
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
                 margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                realized_pl_monthly, realized_pl_yearly, open_charts, open_trades,
+                autotrading_status, ea_status, terminal_errors, empty_charts_count,
+                empty_charts_symbols, open_pairs_charts, deposits_today, withdrawals_today,
+                deposits_weekly, withdrawals_weekly, deposits_monthly, withdrawals_monthly,
+                deposits_yearly, withdrawals_yearly, deposits_all_time, withdrawals_all_time
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE 
             SET broker = EXCLUDED.broker,
                 balance = EXCLUDED.balance,
@@ -108,18 +72,30 @@ def receive_mt4_data():
                 realized_pl_monthly = EXCLUDED.realized_pl_monthly,
                 realized_pl_yearly = EXCLUDED.realized_pl_yearly,
                 open_charts = EXCLUDED.open_charts,
-                open_trades = EXCLUDED.open_trades;
-        """, (
-            broker, account_number, balance, equity, margin_used, free_margin,
-            margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-            realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
-        ))
+                open_trades = EXCLUDED.open_trades,
+                autotrading_status = EXCLUDED.autotrading_status,
+                ea_status = EXCLUDED.ea_status,
+                terminal_errors = EXCLUDED.terminal_errors,
+                empty_charts_count = EXCLUDED.empty_charts_count,
+                empty_charts_symbols = EXCLUDED.empty_charts_symbols,
+                open_pairs_charts = EXCLUDED.open_pairs_charts,
+                deposits_today = EXCLUDED.deposits_today,
+                withdrawals_today = EXCLUDED.withdrawals_today,
+                deposits_weekly = EXCLUDED.deposits_weekly,
+                withdrawals_weekly = EXCLUDED.withdrawals_weekly,
+                deposits_monthly = EXCLUDED.deposits_monthly,
+                withdrawals_monthly = EXCLUDED.withdrawals_monthly,
+                deposits_yearly = EXCLUDED.deposits_yearly,
+                withdrawals_yearly = EXCLUDED.withdrawals_yearly,
+                deposits_all_time = EXCLUDED.deposits_all_time,
+                withdrawals_all_time = EXCLUDED.withdrawals_all_time;
+        """, tuple(data[field] for field in required_fields))
 
         conn.commit()
         cur.close()
         conn.close()
 
-        logger.info(f"✅ Data stored successfully for account {account_number}")
+        logger.info(f"✅ Data stored successfully for account {data['account_number']}")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
@@ -135,38 +111,18 @@ def get_accounts():
             return jsonify({"error": "Database connection failed"}), 500
 
         cur = conn.cursor()
-        cur.execute("""
-            SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                   realized_pl_monthly, realized_pl_yearly, open_charts, open_trades
-            FROM accounts 
-            ORDER BY profit_loss DESC;
-        """)
-        accounts = cur.fetchall()
+        cur.execute("SELECT * FROM accounts ORDER BY profit_loss DESC;")
+        columns = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        accounts_data = [dict(
-            broker=row[0], account_number=row[1], balance=row[2], equity=row[3],
-            margin_used=row[4], free_margin=row[5], margin_percent=row[6],
-            profit_loss=row[7], realized_pl_daily=row[8], realized_pl_weekly=row[9],
-            realized_pl_monthly=row[10], realized_pl_yearly=row[11],
-            open_charts=row[12], open_trades=row[13]
-        ) for row in accounts]
-
+        accounts_data = [dict(zip(columns, row)) for row in rows]
         return jsonify({"accounts": accounts_data})
 
     except Exception as e:
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ 404 Handler
-@app.errorhandler(404)
-def not_found(error):
-    logger.error("❌ 404 Not Found: The requested URL does not exist.")
-    return jsonify({"error": "404 Not Found"}), 404
-
-# ✅ Initialize Database on Startup
 if __name__ == "__main__":
-    ensure_column_exists()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
