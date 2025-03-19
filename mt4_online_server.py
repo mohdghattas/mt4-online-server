@@ -19,8 +19,52 @@ def get_db_connection():
         conn = psycopg2.connect(DB_URL, sslmode="require")
         return conn
     except Exception as e:
-        logger.error(f" Database connection failed: {e}")
+        logger.error(f"Database connection failed: {e}")
         return None
+
+# Create the accounts table if it doesn't exist
+def create_table():
+    conn = get_db_connection()
+    if not conn:
+        logger.error("Cannot create table: No database connection")
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                broker TEXT NOT NULL,
+                account_number BIGINT PRIMARY KEY,
+                balance DOUBLE PRECISION DEFAULT 0,
+                equity DOUBLE PRECISION DEFAULT 0,
+                margin_used DOUBLE PRECISION DEFAULT 0,
+                free_margin DOUBLE PRECISION DEFAULT 0,
+                margin_percent DOUBLE PRECISION DEFAULT 0,
+                profit_loss DOUBLE PRECISION DEFAULT 0,
+                realized_pl_daily DOUBLE PRECISION DEFAULT 0,
+                realized_pl_weekly DOUBLE PRECISION DEFAULT 0,
+                realized_pl_monthly DOUBLE PRECISION DEFAULT 0,
+                realized_pl_yearly DOUBLE PRECISION DEFAULT 0,
+                realized_pl_alltime DOUBLE PRECISION DEFAULT 0,
+                deposits_alltime DOUBLE PRECISION DEFAULT 0,
+                withdrawals_alltime DOUBLE PRECISION DEFAULT 0,
+                holding_fee_daily DOUBLE PRECISION DEFAULT 0,
+                holding_fee_weekly DOUBLE PRECISION DEFAULT 0,
+                holding_fee_monthly DOUBLE PRECISION DEFAULT 0,
+                holding_fee_yearly DOUBLE PRECISION DEFAULT 0,
+                holding_fee_alltime DOUBLE PRECISION DEFAULT 0,
+                open_charts INTEGER DEFAULT 0,
+                empty_charts INTEGER DEFAULT 0,
+                open_trades INTEGER DEFAULT 0,
+                autotrading BOOLEAN DEFAULT FALSE
+            );
+        """)
+        conn.commit()
+        logger.info("Accounts table created or already exists")
+    except Exception as e:
+        logger.error(f"Table creation failed: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
 # Ensure all columns exist
 def ensure_columns():
@@ -36,6 +80,7 @@ def ensure_columns():
     }
     conn = get_db_connection()
     if not conn:
+        logger.error("Cannot ensure columns: No database connection")
         return
     cur = conn.cursor()
     try:
@@ -43,11 +88,12 @@ def ensure_columns():
         existing_columns = {row[0] for row in cur.fetchall()}
         for column, col_type in expected_columns.items():
             if column not in existing_columns:
-                logger.info(f" Adding missing column: {column}")
-                cur.execute(f"ALTER TABLE accounts ADD COLUMN {column} {col_type};")
+                logger.info(f"Adding missing column: {column}")
+                cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {column} {col_type};")
         conn.commit()
+        logger.info("All expected columns ensured")
     except Exception as e:
-        logger.error(f" Column check/creation failed: {e}")
+        logger.error(f"Column check/creation failed: {e}")
     finally:
         cur.close()
         conn.close()
@@ -56,8 +102,8 @@ def ensure_columns():
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = request.data.decode("utf-8", errors="replace")
-        logger.debug(f" Raw Request Data: {raw_data}")
+        raw_data = request.data.decode("utf-8", errors="replace").strip()  # Fix: Trim extra characters
+        logger.debug(f"Raw Request Data: {raw_data}")
         json_data = json.loads(raw_data)
 
         required_fields = [
@@ -146,13 +192,16 @@ def get_accounts():
         conn.close()
         return jsonify({"accounts": [dict(zip(columns, row)) for row in rows]})
     except Exception as e:
-        logger.error(f" API Fetch Error: {str(e)}")
+        logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
+# Run table creation and column checks on startup
+create_table()
+ensure_columns()
+
 if __name__ == "__main__":
-    ensure_columns()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
