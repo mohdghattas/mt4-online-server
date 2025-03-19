@@ -6,45 +6,39 @@ import os
 import json
 import re
 
-# ✅ Initialize Flask App
 app = Flask(__name__)
 CORS(app)
-
-# ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
-# ✅ Database connection function
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
-# ✅ Ensure required columns exist
 def ensure_columns():
-    columns = [
-        ("autotrading", "BOOLEAN"),
-        ("empty_charts", "INTEGER"),
-        ("deposits_alltime", "NUMERIC"),
-        ("withdrawals_alltime", "NUMERIC"),
-        ("open_pairs_charts", "TEXT")
-    ]
     conn = get_db_connection()
     cur = conn.cursor()
-    for column, col_type in columns:
+
+    alter_statements = [
+        ("autotrading", "BOOLEAN DEFAULT false"),
+        ("empty_charts", "INTEGER DEFAULT 0"),
+        ("deposits_alltime", "NUMERIC DEFAULT 0"),
+        ("withdrawals_alltime", "NUMERIC DEFAULT 0"),
+        ("open_pairs_charts", "TEXT DEFAULT ''")
+    ]
+    
+    for column, data_type in alter_statements:
         cur.execute(f"""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='accounts' AND column_name='{column}') THEN
-                    ALTER TABLE accounts ADD COLUMN {column} {col_type};
-                END IF;
-            END
-            $$;
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'accounts' AND column_name = '{column}';
         """)
+        if not cur.fetchone():
+            cur.execute(f"ALTER TABLE accounts ADD COLUMN {column} {data_type};")
+            logger.info(f"✅ Added missing column: {column}")
+
     conn.commit()
     cur.close()
     conn.close()
 
-# ✅ Handle multiple JSON objects concatenated in request
 def split_json_objects(raw_data):
     json_objects = []
     pattern = re.compile(r'({.*?})(?=\s*{|\s*$)', re.DOTALL)
@@ -56,7 +50,6 @@ def split_json_objects(raw_data):
             logger.error(f"❌ JSON Decoding Error in part: {e}")
     return json_objects
 
-# ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
@@ -68,7 +61,6 @@ def receive_mt4_data():
         cur = conn.cursor()
 
         for json_data in json_objects:
-            # ✅ Extract Data
             broker = json_data.get("broker")
             account_number = json_data.get("account_number")
             balance = json_data.get("balance")
@@ -89,7 +81,6 @@ def receive_mt4_data():
             withdrawals_alltime = json_data.get("withdrawals_alltime")
             open_pairs_charts = json_data.get("open_pairs_charts")
 
-            # ✅ Insert/Update Query
             cur.execute("""
                 INSERT INTO accounts (
                     broker, account_number, balance, equity, margin_used, free_margin,
@@ -133,7 +124,6 @@ def receive_mt4_data():
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
-# ✅ API: Retrieve Accounts Data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -169,13 +159,11 @@ def get_accounts():
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ 404 Handler
 @app.errorhandler(404)
 def not_found(error):
     logger.error("❌ 404 Not Found: The requested URL does not exist.")
     return jsonify({"error": "404 Not Found"}), 404
 
-# ✅ Initialize columns on startup
 if __name__ == "__main__":
     ensure_columns()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
