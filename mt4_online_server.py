@@ -20,39 +20,62 @@ def get_db_connection():
         logger.error(f"❌ Database Connection Error: {str(e)}")
         return None
 
-# Automatically adds missing columns
 def ensure_columns():
-    columns = {
-        "realized_pl_alltime": "NUMERIC(20,2) DEFAULT 0",
-        "holding_fee_daily": "NUMERIC(20,2) DEFAULT 0",
-        "holding_fee_weekly": "NUMERIC(20,2) DEFAULT 0",
-        "holding_fee_monthly": "NUMERIC(20,2) DEFAULT 0",
-        "holding_fee_yearly": "NUMERIC(20,2) DEFAULT 0",
-        "holding_fee_alltime": "NUMERIC(20,2) DEFAULT 0",
-        "deposits_alltime": "NUMERIC(20,2) DEFAULT 0",
-        "withdrawals_alltime": "NUMERIC(20,2) DEFAULT 0",
-        "autotrading": "BOOLEAN DEFAULT FALSE",
-        "empty_charts": "INTEGER DEFAULT 0"
-    }
     conn = get_db_connection()
     if not conn:
         return
+    
     try:
         cur = conn.cursor()
+        
+        # Create accounts table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_number INTEGER PRIMARY KEY,
+                broker TEXT,
+                balance NUMERIC(20,2),
+                equity NUMERIC(20,2),
+                margin_used NUMERIC(20,2),
+                free_margin NUMERIC(20,2),
+                margin_percent NUMERIC(20,2),
+                profit_loss NUMERIC(20,2),
+                realized_pl_daily NUMERIC(20,2),
+                realized_pl_weekly NUMERIC(20,2),
+                realized_pl_monthly NUMERIC(20,2),
+                realized_pl_yearly NUMERIC(20,2),
+                open_charts INTEGER,
+                open_trades INTEGER
+            )
+        """)
+        conn.commit()
+
+        # Add new columns if they don't exist
+        columns = {
+            "realized_pl_alltime": "NUMERIC(20,2) DEFAULT 0",
+            "holding_fee_daily": "NUMERIC(20,2) DEFAULT 0",
+            "holding_fee_weekly": "NUMERIC(20,2) DEFAULT 0",
+            "holding_fee_monthly": "NUMERIC(20,2) DEFAULT 0",
+            "holding_fee_yearly": "NUMERIC(20,2) DEFAULT 0",
+            "holding_fee_alltime": "NUMERIC(20,2) DEFAULT 0",
+            "deposits_alltime": "NUMERIC(20,2) DEFAULT 0",
+            "withdrawals_alltime": "NUMERIC(20,2) DEFAULT 0",
+            "autotrading": "BOOLEAN DEFAULT FALSE",
+            "empty_charts": "INTEGER DEFAULT 0"
+        }
+
         for col, dtype in columns.items():
             cur.execute(f"""
-                DO $$ BEGIN
-                    BEGIN
-                        ALTER TABLE accounts ADD COLUMN {col} {dtype};
-                    EXCEPTION WHEN duplicate_column THEN
-                        NULL;
-                    END;
-                END $$;
+                ALTER TABLE accounts 
+                ADD COLUMN IF NOT EXISTS {col} {dtype}
             """)
+        
         conn.commit()
         cur.close()
+        logger.info("✅ Database schema verified/updated successfully")
+        
     except Exception as e:
-        logger.error(f"❌ Column Ensuring Error: {str(e)}")
+        logger.error(f"❌ Database setup error: {str(e)}")
+        conn.rollback()
     finally:
         conn.close()
 
@@ -78,12 +101,13 @@ def receive_mt4_data():
                 account_number = json_data.get("account_number")
 
                 columns = [
-                    "broker", "account_number", "balance", "equity", "margin_used", "free_margin",
-                    "margin_percent", "profit_loss", "realized_pl_daily", "realized_pl_weekly",
-                    "realized_pl_monthly", "realized_pl_yearly", "realized_pl_alltime",
-                    "deposits_alltime", "withdrawals_alltime", "holding_fee_daily",
-                    "holding_fee_weekly", "holding_fee_monthly", "holding_fee_yearly",
-                    "holding_fee_alltime", "open_charts", "open_trades", "empty_charts", "autotrading"
+                    "broker", "account_number", "balance", "equity", "margin_used",
+                    "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
+                    "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
+                    "realized_pl_alltime", "deposits_alltime", "withdrawals_alltime",
+                    "holding_fee_daily", "holding_fee_weekly", "holding_fee_monthly",
+                    "holding_fee_yearly", "holding_fee_alltime", "open_charts",
+                    "open_trades", "empty_charts", "autotrading"
                 ]
 
                 values = [json_data.get(col) for col in columns]
@@ -91,7 +115,9 @@ def receive_mt4_data():
                 placeholders = ", ".join(["%s"] * len(columns))
                 columns_str = ", ".join(columns)
 
-                update_stmt = ", ".join([f"{col} = EXCLUDED.{col}" for col in columns if col != "account_number"])
+                update_stmt = ", ".join(
+                    [f"{col} = EXCLUDED.{col}" for col in columns if col != "account_number"]
+                )
 
                 cur.execute(f"""
                     INSERT INTO accounts ({columns_str})
@@ -103,6 +129,8 @@ def receive_mt4_data():
 
             except json.JSONDecodeError as e:
                 logger.error(f"❌ JSON Decoding Error in chunk: {e}")
+            except KeyError as e:
+                logger.error(f"❌ Missing key in JSON data: {str(e)}")
 
         conn.commit()
         cur.close()
