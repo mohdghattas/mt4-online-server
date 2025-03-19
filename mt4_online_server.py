@@ -6,67 +6,97 @@ import os
 import json
 import re
 
+# ✅ Initialize Flask App
 app = Flask(__name__)
 CORS(app)
+
+# ✅ Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
+# ✅ Database connection function
 def get_db_connection():
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Database Connection Error: {str(e)}")
-        return None
+    return psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
 
+# ✅ Ensure required columns exist
+def ensure_columns():
+    columns = [
+        ("autotrading", "BOOLEAN"),
+        ("empty_charts", "INTEGER"),
+        ("deposits_alltime", "NUMERIC"),
+        ("withdrawals_alltime", "NUMERIC"),
+        ("open_pairs_charts", "TEXT")
+    ]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    for column, col_type in columns:
+        cur.execute(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='accounts' AND column_name='{column}') THEN
+                    ALTER TABLE accounts ADD COLUMN {column} {col_type};
+                END IF;
+            END
+            $$;
+        """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ✅ Handle multiple JSON objects concatenated in request
 def split_json_objects(raw_data):
-    # Split JSON objects safely
-    pattern = r'(?<=})\s*(?={)'
-    json_strings = re.split(pattern, raw_data.strip())
-    return json_strings
+    json_objects = []
+    pattern = re.compile(r'({.*?})(?=\s*{|\s*$)', re.DOTALL)
+    matches = pattern.findall(raw_data)
+    for match in matches:
+        try:
+            json_objects.append(json.loads(match))
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON Decoding Error in part: {e}")
+    return json_objects
 
+# ✅ API Endpoint: Receive Data from MT4 EA
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         raw_data = request.data.decode("utf-8", errors="replace")
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        json_parts = split_json_objects(raw_data)
-        if not json_parts:
-            return jsonify({"error": "No JSON data detected"}), 400
-
+        json_objects = split_json_objects(raw_data)
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
-        for json_str in json_parts:
-            try:
-                json_data = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON Decoding Error in part: {e}")
-                continue  # skip malformed parts
+        for json_data in json_objects:
+            # ✅ Extract Data
+            broker = json_data.get("broker")
+            account_number = json_data.get("account_number")
+            balance = json_data.get("balance")
+            equity = json_data.get("equity")
+            margin_used = json_data.get("margin_used")
+            free_margin = json_data.get("free_margin")
+            margin_percent = json_data.get("margin_percent")
+            profit_loss = json_data.get("profit_loss")
+            realized_pl_daily = json_data.get("realized_pl_daily")
+            realized_pl_weekly = json_data.get("realized_pl_weekly")
+            realized_pl_monthly = json_data.get("realized_pl_monthly")
+            realized_pl_yearly = json_data.get("realized_pl_yearly")
+            open_charts = json_data.get("open_charts")
+            open_trades = json_data.get("open_trades")
+            autotrading = json_data.get("autotrading")
+            empty_charts = json_data.get("empty_charts")
+            deposits_alltime = json_data.get("deposits_alltime")
+            withdrawals_alltime = json_data.get("withdrawals_alltime")
+            open_pairs_charts = json_data.get("open_pairs_charts")
 
-            logger.debug(f"✅ Clean JSON Data: {json_data}")
-
-            # Extract & validate fields
-            required_fields = ["broker", "account_number", "balance", "equity", "margin_used",
-                               "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
-                               "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
-                               "open_charts", "open_trades", "autotrading", "empty_charts",
-                               "deposits_alltime", "withdrawals_alltime"]
-            if any(field not in json_data for field in required_fields):
-                logger.error(f"❌ Missing fields in payload: {json_data}")
-                continue
-
-            # Insert or update DB
+            # ✅ Insert/Update Query
             cur.execute("""
                 INSERT INTO accounts (
                     broker, account_number, balance, equity, margin_used, free_margin,
                     margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
                     realized_pl_monthly, realized_pl_yearly, open_charts, open_trades,
-                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime, open_pairs_charts
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (account_number) DO UPDATE
                 SET broker = EXCLUDED.broker,
                     balance = EXCLUDED.balance,
@@ -84,14 +114,13 @@ def receive_mt4_data():
                     autotrading = EXCLUDED.autotrading,
                     empty_charts = EXCLUDED.empty_charts,
                     deposits_alltime = EXCLUDED.deposits_alltime,
-                    withdrawals_alltime = EXCLUDED.withdrawals_alltime;
+                    withdrawals_alltime = EXCLUDED.withdrawals_alltime,
+                    open_pairs_charts = EXCLUDED.open_pairs_charts;
             """, (
-                json_data["broker"], json_data["account_number"], json_data["balance"],
-                json_data["equity"], json_data["margin_used"], json_data["free_margin"],
-                json_data["margin_percent"], json_data["profit_loss"], json_data["realized_pl_daily"],
-                json_data["realized_pl_weekly"], json_data["realized_pl_monthly"], json_data["realized_pl_yearly"],
-                json_data["open_charts"], json_data["open_trades"], json_data["autotrading"],
-                json_data["empty_charts"], json_data["deposits_alltime"], json_data["withdrawals_alltime"]
+                broker, account_number, balance, equity, margin_used, free_margin,
+                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
+                realized_pl_monthly, realized_pl_yearly, open_charts, open_trades,
+                autotrading, empty_charts, deposits_alltime, withdrawals_alltime, open_pairs_charts
             ))
 
         conn.commit()
@@ -101,39 +130,52 @@ def receive_mt4_data():
         return jsonify({"message": "Data processed successfully"}), 200
 
     except Exception as e:
-        logger.error(f"❌ Server Error: {str(e)}", exc_info=True)
+        logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+# ✅ API: Retrieve Accounts Data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("""
             SELECT broker, account_number, balance, equity, margin_used, free_margin,
                    margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
                    realized_pl_monthly, realized_pl_yearly, open_charts, open_trades,
-                   autotrading, empty_charts, deposits_alltime, withdrawals_alltime
+                   autotrading, empty_charts, deposits_alltime, withdrawals_alltime, open_pairs_charts
             FROM accounts 
             ORDER BY profit_loss DESC;
         """)
-        accounts = cur.fetchall()
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        accounts_data = [dict(
-            broker=row[0], account_number=row[1], balance=row[2], equity=row[3],
-            margin_used=row[4], free_margin=row[5], margin_percent=row[6],
-            profit_loss=row[7], realized_pl_daily=row[8], realized_pl_weekly=row[9],
-            realized_pl_monthly=row[10], realized_pl_yearly=row[11], open_charts=row[12],
-            open_trades=row[13], autotrading=row[14], empty_charts=row[15],
-            deposits_alltime=row[16], withdrawals_alltime=row[17]
-        ) for row in accounts]
+
+        accounts_data = []
+        for row in rows:
+            accounts_data.append({
+                "broker": row[0], "account_number": row[1], "balance": row[2], "equity": row[3],
+                "margin_used": row[4], "free_margin": row[5], "margin_percent": row[6],
+                "profit_loss": row[7], "realized_pl_daily": row[8], "realized_pl_weekly": row[9],
+                "realized_pl_monthly": row[10], "realized_pl_yearly": row[11],
+                "open_charts": row[12], "open_trades": row[13], "autotrading": row[14],
+                "empty_charts": row[15], "deposits_alltime": row[16],
+                "withdrawals_alltime": row[17], "open_pairs_charts": row[18]
+            })
+
         return jsonify({"accounts": accounts_data})
+
     except Exception as e:
         logger.error(f"❌ API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+# ✅ 404 Handler
+@app.errorhandler(404)
+def not_found(error):
+    logger.error("❌ 404 Not Found: The requested URL does not exist.")
+    return jsonify({"error": "404 Not Found"}), 404
+
+# ✅ Initialize columns on startup
 if __name__ == "__main__":
+    ensure_columns()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
