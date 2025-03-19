@@ -1,174 +1,143 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import psycopg2
-import logging
-import os
 import json
-import re
+import sqlite3
+import logging
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-app = Flask(__name__)
-CORS(app)
+# Configuration
+DB_PATH = "mt4_data.db"
+TABLE_NAME = "trade_stats"  # example table name where data is stored
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"), sslmode="require")
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Database Connection Error: {str(e)}")
-        return None
+# Initialize database connection (thread-safe for HTTPServer usage if needed)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
 
-def ensure_columns():
-    conn = get_db_connection()
-    if not conn:
-        return
-    
-    try:
-        cur = conn.cursor()
-        
-        # Create accounts table if not exists
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                account_number INTEGER PRIMARY KEY,
-                broker TEXT,
-                balance NUMERIC(20,2),
-                equity NUMERIC(20,2),
-                margin_used NUMERIC(20,2),
-                free_margin NUMERIC(20,2),
-                margin_percent NUMERIC(20,2),
-                profit_loss NUMERIC(20,2),
-                realized_pl_daily NUMERIC(20,2),
-                realized_pl_weekly NUMERIC(20,2),
-                realized_pl_monthly NUMERIC(20,2),
-                realized_pl_yearly NUMERIC(20,2),
-                open_charts INTEGER,
-                open_trades INTEGER
-            )
-        """)
-        conn.commit()
+# Ensure the main table exists (create if not exists with at least an ID and timestamp)
+cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT
+        /* other initial columns can be defined here if known, e.g. balance, equity, etc. */
+    )
+""")
+conn.commit()
 
-        # Add new columns if they don't exist
-        columns = {
-            "realized_pl_alltime": "NUMERIC(20,2) DEFAULT 0",
-            "holding_fee_daily": "NUMERIC(20,2) DEFAULT 0",
-            "holding_fee_weekly": "NUMERIC(20,2) DEFAULT 0",
-            "holding_fee_monthly": "NUMERIC(20,2) DEFAULT 0",
-            "holding_fee_yearly": "NUMERIC(20,2) DEFAULT 0",
-            "holding_fee_alltime": "NUMERIC(20,2) DEFAULT 0",
-            "deposits_alltime": "NUMERIC(20,2) DEFAULT 0",
-            "withdrawals_alltime": "NUMERIC(20,2) DEFAULT 0",
-            "autotrading": "BOOLEAN DEFAULT FALSE",
-            "empty_charts": "INTEGER DEFAULT 0"
-        }
+# Function to ensure a column exists in the table (adds if missing)
+def ensure_column_exists(column_name, value_example=None):
+    """Check if column exists in TABLE_NAME; if not, alter table to add it."""
+    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
+    columns = [row[1] for row in cursor.fetchall()]  # PRAGMA table_info returns list of columns in position 1
+    if column_name not in columns:
+        # Determine column type based on example value (if provided)
+        # Default to TEXT if type cannot be determined
+        col_type = "TEXT"
+        if value_example is not None:
+            if isinstance(value_example, int):
+                col_type = "INTEGER"
+            elif isinstance(value_example, float):
+                col_type = "REAL"
+            elif isinstance(value_example, bool):
+                # Store booleans as integers 0/1
+                col_type = "INTEGER"
+            # (For strings, TEXT is already the default)
+        try:
+            logging.info(f"Adding missing column '{column_name}' to table {TABLE_NAME} ({col_type})")
+            cursor.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {column_name} {col_type}")
+            conn.commit()
+        except Exception as e:
+            # Ignore error if column already exists (in case of race condition) or log other errors
+            if "duplicate column name" in str(e).lower():
+                logging.warning(f"Column '{column_name}' already exists (caught duplicate error).")
+            else:
+                logging.error(f"Error adding column '{column_name}': {e}")
 
-        for col, dtype in columns.items():
-            cur.execute(f"""
-                ALTER TABLE accounts 
-                ADD COLUMN IF NOT EXISTS {col} {dtype}
-            """)
-        
-        conn.commit()
-        cur.close()
-        logger.info("✅ Database schema verified/updated successfully")
-        
-    except Exception as e:
-        logger.error(f"❌ Database setup error: {str(e)}")
-        conn.rollback()
-    finally:
-        conn.close()
+# Custom HTTP request handler
+class MT4RequestHandler(BaseHTTPRequestHandler):
+    # Buffer to accumulate data (class-level, one per connection if keep-alive is used)
+    buffer = ""
 
-@app.route("/api/mt4data", methods=["POST"])
-def receive_mt4_data():
-    try:
-        raw_data = request.data.decode("utf-8", errors="replace")
-        logger.debug(f"📥 Raw Request Data: {raw_data}")
+    def do_POST(self):
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length == 0:
+            # No data to read
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"No JSON payload received")
+            return
 
-        json_chunks = re.findall(r"\{.*?\}(?=\{|\Z)", raw_data)
-        if not json_chunks:
-            return jsonify({"error": "No valid JSON objects found"}), 400
+        # Read the raw POST body data
+        raw_data = self.rfile.read(content_length).decode('utf-8', errors='ignore')
+        # Append to buffer (in case of partial data or multiple JSON objects concatenated)
+        MT4RequestHandler.buffer += raw_data
 
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-
-        cur = conn.cursor()
-
-        for chunk in json_chunks:
+        # Try to parse as many JSON objects as possible from the buffer
+        decoder = json.JSONDecoder()
+        data_objects = []
+        while MT4RequestHandler.buffer:
+            MT4RequestHandler.buffer = MT4RequestHandler.buffer.lstrip()  # strip any leading whitespace/newlines
             try:
-                json_data = json.loads(chunk)
-                account_number = json_data.get("account_number")
+                obj, index = decoder.raw_decode(MT4RequestHandler.buffer)
+            except json.JSONDecodeError:
+                # Incomplete or malformed JSON at the current position
+                break  # break out to wait for more data (or end if none)
+            # If decoded successfully, append the object and trim the buffer
+            data_objects.append(obj)
+            MT4RequestHandler.buffer = MT4RequestHandler.buffer[index:]  # remove the parsed JSON from buffer
 
-                columns = [
-                    "broker", "account_number", "balance", "equity", "margin_used",
-                    "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
-                    "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
-                    "realized_pl_alltime", "deposits_alltime", "withdrawals_alltime",
-                    "holding_fee_daily", "holding_fee_weekly", "holding_fee_monthly",
-                    "holding_fee_yearly", "holding_fee_alltime", "open_charts",
-                    "open_trades", "empty_charts", "autotrading"
-                ]
+        # Process each fully parsed JSON object
+        for data in data_objects:
+            if not isinstance(data, dict):
+                # If the JSON root is not an object (dict), skip it
+                logging.warning("Received JSON is not an object/dict, skipping.")
+                continue
 
-                values = [json_data.get(col) for col in columns]
+            # Ensure required columns exist for all keys in the JSON data
+            for key, value in data.items():
+                if key is None:
+                    continue
+                ensure_column_exists(key, value)
 
-                placeholders = ", ".join(["%s"] * len(columns))
-                columns_str = ", ".join(columns)
+            # Also ensure the specific `realized_pl_alltime` column exists (for safety, even if not in this payload)
+            # This is somewhat redundant if the key is present in data, but covers cases where we expect it even if value is 0/missing.
+            ensure_column_exists("realized_pl_alltime", data.get("realized_pl_alltime", 0.0))
 
-                update_stmt = ", ".join(
-                    [f"{col} = EXCLUDED.{col}" for col in columns if col != "account_number"]
-                )
+            # Prepare SQL insertion of the data into the table
+            # Using parameterized query for safety
+            columns = ", ".join(data.keys())
+            placeholders = ", ".join(["?"] * len(data))
+            values = list(data.values())
+            try:
+                cursor.execute(f"INSERT INTO {TABLE_NAME} ({columns}) VALUES ({placeholders})", values)
+                conn.commit()
+                logging.info(f"Inserted data: {data}")
+            except Exception as e:
+                logging.error(f"Database insertion error: {e}")
+                # (Optional) send an error response or handle accordingly
 
-                cur.execute(f"""
-                    INSERT INTO accounts ({columns_str})
-                    VALUES ({placeholders})
-                    ON CONFLICT (account_number) DO UPDATE SET {update_stmt}
-                """, values)
+        # Send success response after processing all objects
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-                logger.info(f"✅ Data stored successfully for account {account_number}")
+    def log_message(self, format, *args):
+        # Overriding to reduce console output (optional)
+        return
 
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON Decoding Error in chunk: {e}")
-            except KeyError as e:
-                logger.error(f"❌ Missing key in JSON data: {str(e)}")
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({"message": "Data processed successfully"}), 200
-
-    except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
+# Start the HTTP server (listening on a port, e.g., 8080)
+def run_server(server_class=HTTPServer, handler_class=MT4RequestHandler, port=8080):
+    server_address = ('', port)
+    httpd = server_class(server_address, handler_class)
+    logging.info(f"Starting MT4 API server on port {port}...")
     try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT * FROM accounts ORDER BY profit_loss DESC;
-        """)
-        rows = cur.fetchall()
-        colnames = [desc[0] for desc in cur.description]
-        cur.close()
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logging.info("Shutting down server.")
+        httpd.server_close()
         conn.close()
-
-        accounts_data = [dict(zip(colnames, row)) for row in rows]
-        return jsonify({"accounts": accounts_data})
-
-    except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    logger.error("❌ 404 Not Found")
-    return jsonify({"error": "404 Not Found"}), 404
 
 if __name__ == "__main__":
-    ensure_columns()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    run_server()
