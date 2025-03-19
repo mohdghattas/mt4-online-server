@@ -101,9 +101,7 @@ def ensure_columns():
 
 # Clean raw data to remove non-printable characters
 def clean_json_string(raw_data):
-    # Decode with replacement for invalid chars, then remove non-printable chars except necessary ones
     decoded = raw_data.decode("utf-8", errors="replace")
-    # Keep only printable characters (ASCII 32-126) and common JSON chars (e.g., {}, [], ", etc.)
     cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
     return cleaned.strip()
 
@@ -111,7 +109,7 @@ def clean_json_string(raw_data):
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = clean_json_string(request.data)  # Fix: Enhanced cleaning
+        raw_data = clean_json_string(request.data)
         logger.debug(f"Raw Request Data: {raw_data}")
         json_data = json.loads(raw_data)
 
@@ -124,10 +122,13 @@ def receive_mt4_data():
             "holding_fee_yearly", "holding_fee_alltime", "open_charts",
             "empty_charts", "open_trades", "autotrading"
         ]
+        
+        # Add default values for missing fields
         for field in required_fields:
             if field not in json_data:
-                logger.error(f"❌ Missing field: {field}")
-                return jsonify({"error": f"Missing field: {field}"}), 400
+                default_value = 0.0 if "fee" in field or "pl" in field or "margin" in field or field in ["balance", "equity", "profit_loss"] else 0 if field in ["open_charts", "empty_charts", "open_trades"] else False if field == "autotrading" else ""
+                json_data[field] = default_value
+                logger.warning(f"Field {field} missing, using default: {default_value}")
 
         conn = get_db_connection()
         if not conn:
@@ -197,9 +198,11 @@ def get_accounts():
         """)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
+        result = [dict(zip(columns, row)) for row in rows]
+        logger.debug(f"Fetched accounts: {json.dumps(result)}")  # Debug: Log fetched data
         cur.close()
         conn.close()
-        return jsonify({"accounts": [dict(zip(columns, row)) for row in rows]})
+        return jsonify({"accounts": result})
     except Exception as e:
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
