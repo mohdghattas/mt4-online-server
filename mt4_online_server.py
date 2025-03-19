@@ -4,6 +4,7 @@ import psycopg2
 import logging
 import os
 import json
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -98,11 +99,19 @@ def ensure_columns():
         cur.close()
         conn.close()
 
+# Clean raw data to remove non-printable characters
+def clean_json_string(raw_data):
+    # Decode with replacement for invalid chars, then remove non-printable chars except necessary ones
+    decoded = raw_data.decode("utf-8", errors="replace")
+    # Keep only printable characters (ASCII 32-126) and common JSON chars (e.g., {}, [], ", etc.)
+    cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
+    return cleaned.strip()
+
 # API Endpoint
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = request.data.decode("utf-8", errors="replace").strip()  # Fix: Trim extra characters
+        raw_data = clean_json_string(request.data)  # Fix: Enhanced cleaning
         logger.debug(f"Raw Request Data: {raw_data}")
         json_data = json.loads(raw_data)
 
