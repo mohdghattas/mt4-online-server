@@ -4,8 +4,8 @@ import psycopg2
 import logging
 import os
 import json
+import re
 
-# Initialize Flask App
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.DEBUG)
@@ -25,19 +25,11 @@ def receive_mt4_data():
         raw_data = request.data.decode("utf-8", errors="replace")
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
-        json_objects = []
-        raw_chunks = raw_data.strip().split("}{")
-        if len(raw_chunks) > 1:
-            raw_chunks = [f"{chunk}}}" if i == 0 else f"{{{chunk}}}" for i, chunk in enumerate(raw_chunks)]
-        else:
-            raw_chunks = [raw_data]
+        json_parts = re.findall(r'\{(?:[^{}]|(?R))*\}', raw_data)
 
-        for chunk in raw_chunks:
-            try:
-                json_objects.append(json.loads(chunk))
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON Decoding Error in chunk: {e}")
-                continue
+        if not json_parts:
+            logger.error("❌ No valid JSON objects found.")
+            return jsonify({"error": "Invalid JSON format"}), 400
 
         conn = get_db_connection()
         if not conn:
@@ -45,7 +37,14 @@ def receive_mt4_data():
 
         cur = conn.cursor()
 
-        for json_data in json_objects:
+        for part in json_parts:
+            try:
+                json_data = json.loads(part)
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON Decoding Error in chunk: {e}")
+                continue
+
+            # Insert or update all metrics
             cur.execute("""
                 INSERT INTO accounts (
                     broker, account_number, balance, equity, margin_used, free_margin,
@@ -106,32 +105,12 @@ def receive_mt4_data():
         conn.commit()
         cur.close()
         conn.close()
-
         logger.info(f"✅ All valid JSON parts processed successfully.")
         return jsonify({"message": "Data stored successfully"}), 200
 
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
-
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM accounts ORDER BY profit_loss DESC;")
-        columns = [desc[0] for desc in cur.description]
-        accounts = [dict(zip(columns, row)) for row in cur.fetchall()]
-        cur.close()
-        conn.close()
-
-        return jsonify({"accounts": accounts})
-    except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
