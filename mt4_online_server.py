@@ -17,16 +17,14 @@ def get_db_connection():
 def ensure_columns():
     conn = get_db_connection()
     cur = conn.cursor()
-
-    alter_statements = [
+    columns = [
         ("autotrading", "BOOLEAN DEFAULT false"),
         ("empty_charts", "INTEGER DEFAULT 0"),
         ("deposits_alltime", "NUMERIC DEFAULT 0"),
         ("withdrawals_alltime", "NUMERIC DEFAULT 0"),
         ("open_pairs_charts", "TEXT DEFAULT ''")
     ]
-    
-    for column, data_type in alter_statements:
+    for column, data_type in columns:
         cur.execute(f"""
             SELECT column_name FROM information_schema.columns
             WHERE table_name = 'accounts' AND column_name = '{column}';
@@ -53,6 +51,7 @@ def split_json_objects(raw_data):
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
+        ensure_columns()
         raw_data = request.data.decode("utf-8", errors="replace")
         logger.debug(f"📥 Raw Request Data: {raw_data}")
 
@@ -61,26 +60,6 @@ def receive_mt4_data():
         cur = conn.cursor()
 
         for json_data in json_objects:
-            broker = json_data.get("broker")
-            account_number = json_data.get("account_number")
-            balance = json_data.get("balance")
-            equity = json_data.get("equity")
-            margin_used = json_data.get("margin_used")
-            free_margin = json_data.get("free_margin")
-            margin_percent = json_data.get("margin_percent")
-            profit_loss = json_data.get("profit_loss")
-            realized_pl_daily = json_data.get("realized_pl_daily")
-            realized_pl_weekly = json_data.get("realized_pl_weekly")
-            realized_pl_monthly = json_data.get("realized_pl_monthly")
-            realized_pl_yearly = json_data.get("realized_pl_yearly")
-            open_charts = json_data.get("open_charts")
-            open_trades = json_data.get("open_trades")
-            autotrading = json_data.get("autotrading")
-            empty_charts = json_data.get("empty_charts")
-            deposits_alltime = json_data.get("deposits_alltime")
-            withdrawals_alltime = json_data.get("withdrawals_alltime")
-            open_pairs_charts = json_data.get("open_pairs_charts")
-
             cur.execute("""
                 INSERT INTO accounts (
                     broker, account_number, balance, equity, margin_used, free_margin,
@@ -108,10 +87,14 @@ def receive_mt4_data():
                     withdrawals_alltime = EXCLUDED.withdrawals_alltime,
                     open_pairs_charts = EXCLUDED.open_pairs_charts;
             """, (
-                broker, account_number, balance, equity, margin_used, free_margin,
-                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                realized_pl_monthly, realized_pl_yearly, open_charts, open_trades,
-                autotrading, empty_charts, deposits_alltime, withdrawals_alltime, open_pairs_charts
+                json_data.get("broker"), json_data.get("account_number"), json_data.get("balance"),
+                json_data.get("equity"), json_data.get("margin_used"), json_data.get("free_margin"),
+                json_data.get("margin_percent"), json_data.get("profit_loss"), json_data.get("realized_pl_daily"),
+                json_data.get("realized_pl_weekly"), json_data.get("realized_pl_monthly"),
+                json_data.get("realized_pl_yearly"), json_data.get("open_charts"), json_data.get("open_trades"),
+                json_data.get("autotrading"), json_data.get("empty_charts"),
+                json_data.get("deposits_alltime"), json_data.get("withdrawals_alltime"),
+                json_data.get("open_pairs_charts")
             ))
 
         conn.commit()
@@ -127,6 +110,7 @@ def receive_mt4_data():
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
+        ensure_columns()
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -165,5 +149,4 @@ def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
 if __name__ == "__main__":
-    ensure_columns()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
