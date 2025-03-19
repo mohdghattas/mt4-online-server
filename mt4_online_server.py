@@ -28,14 +28,13 @@ def ensure_columns():
     try:
         cur = conn.cursor()
         
-        # Create accounts table if not exists
+        # Create core table structure
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 account_number INTEGER PRIMARY KEY,
                 broker TEXT,
                 balance NUMERIC(20,2),
                 equity NUMERIC(20,2),
-                margin_used NUMERIC(20,2),
                 free_margin NUMERIC(20,2),
                 margin_percent NUMERIC(20,2),
                 profit_loss NUMERIC(20,2),
@@ -47,10 +46,10 @@ def ensure_columns():
                 open_trades INTEGER
             )
         """)
-        conn.commit()
-
-        # Add new columns if they don't exist
-        columns = {
+        
+        # Add newer columns
+        additional_columns = {
+            "margin_used": "NUMERIC(20,2) DEFAULT 0",
             "realized_pl_alltime": "NUMERIC(20,2) DEFAULT 0",
             "holding_fee_daily": "NUMERIC(20,2) DEFAULT 0",
             "holding_fee_weekly": "NUMERIC(20,2) DEFAULT 0",
@@ -63,111 +62,94 @@ def ensure_columns():
             "empty_charts": "INTEGER DEFAULT 0"
         }
 
-        for col, dtype in columns.items():
+        for col, dtype in additional_columns.items():
             cur.execute(f"""
                 ALTER TABLE accounts 
                 ADD COLUMN IF NOT EXISTS {col} {dtype}
             """)
         
         conn.commit()
-        cur.close()
-        logger.info("✅ Database schema verified/updated successfully")
+        logger.info("✅ Database schema verified")
         
     except Exception as e:
         logger.error(f"❌ Database setup error: {str(e)}")
         conn.rollback()
     finally:
-        conn.close()
+        if conn: conn.close()
 
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
         raw_data = request.data.decode("utf-8", errors="replace")
-        logger.debug(f"📥 Raw Request Data: {raw_data}")
-
         json_chunks = re.findall(r"\{.*?\}(?=\{|\Z)", raw_data)
+
         if not json_chunks:
-            return jsonify({"error": "No valid JSON objects found"}), 400
+            return jsonify({"error": "Invalid data format"}), 400
 
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-
         cur = conn.cursor()
 
         for chunk in json_chunks:
             try:
-                json_data = json.loads(chunk)
-                account_number = json_data.get("account_number")
-
+                data = json.loads(chunk)
                 columns = [
-                    "broker", "account_number", "balance", "equity", "margin_used",
-                    "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
-                    "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
-                    "realized_pl_alltime", "deposits_alltime", "withdrawals_alltime",
-                    "holding_fee_daily", "holding_fee_weekly", "holding_fee_monthly",
-                    "holding_fee_yearly", "holding_fee_alltime", "open_charts",
-                    "open_trades", "empty_charts", "autotrading"
+                    'broker', 'account_number', 'balance', 'equity', 'margin_used',
+                    'free_margin', 'margin_percent', 'profit_loss', 'realized_pl_daily',
+                    'realized_pl_weekly', 'realized_pl_monthly', 'realized_pl_yearly',
+                    'realized_pl_alltime', 'deposits_alltime', 'withdrawals_alltime',
+                    'holding_fee_daily', 'holding_fee_weekly', 'holding_fee_monthly',
+                    'holding_fee_yearly', 'holding_fee_alltime', 'open_charts',
+                    'open_trades', 'empty_charts', 'autotrading'
                 ]
+                values = [data.get(col) for col in columns]
 
-                values = [json_data.get(col) for col in columns]
+                query = f"""
+                    INSERT INTO accounts ({",".join(columns)})
+                    VALUES ({",".join(["%s"]*len(columns))})
+                    ON CONFLICT (account_number) DO UPDATE SET
+                        {",".join([f"{col}=EXCLUDED.{col}" for col in columns if col != "account_number"])}
+                """
+                cur.execute(query, values)
 
-                placeholders = ", ".join(["%s"] * len(columns))
-                columns_str = ", ".join(columns)
-
-                update_stmt = ", ".join(
-                    [f"{col} = EXCLUDED.{col}" for col in columns if col != "account_number"]
-                )
-
-                cur.execute(f"""
-                    INSERT INTO accounts ({columns_str})
-                    VALUES ({placeholders})
-                    ON CONFLICT (account_number) DO UPDATE SET {update_stmt}
-                """, values)
-
-                logger.info(f"✅ Data stored successfully for account {account_number}")
-
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ JSON Decoding Error in chunk: {e}")
-            except KeyError as e:
-                logger.error(f"❌ Missing key in JSON data: {str(e)}")
-
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON chunk: {chunk}")
+        
         conn.commit()
-        cur.close()
-        conn.close()
-        return jsonify({"message": "Data processed successfully"}), 200
+        return jsonify({"message": "Data processed"}), 200
 
     except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"Processing error: {str(e)}")
+        return jsonify({"error": "Server error"}), 500
+    finally:
+        if 'conn' in locals(): conn.close()
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
         conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-
         cur = conn.cursor()
+        
         cur.execute("""
-            SELECT * FROM accounts ORDER BY profit_loss DESC;
+            SELECT 
+                account_number, broker, balance, equity, free_margin,
+                margin_percent, profit_loss, realized_pl_daily,
+                realized_pl_weekly, realized_pl_monthly, realized_pl_yearly,
+                open_charts, open_trades
+            FROM accounts
+            ORDER BY profit_loss DESC
         """)
-        rows = cur.fetchall()
-        colnames = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
-
-        accounts_data = [dict(zip(colnames, row)) for row in rows]
-        return jsonify({"accounts": accounts_data})
+        
+        columns = [desc[0] for desc in cur.description]
+        accounts = [dict(zip(columns, row)) for row in cur.fetchall()]
+        
+        logger.debug(f"Returning {len(accounts)} accounts")
+        return jsonify({"accounts": accounts})
 
     except Exception as e:
-        logger.error(f"❌ API Fetch Error: {str(e)}")
+        logger.error(f"Fetch error: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    logger.error("❌ 404 Not Found")
-    return jsonify({"error": "404 Not Found"}), 404
+    finally:
+        if 'conn' in locals(): conn.close()
 
 if __name__ == "__main__":
     ensure_columns()
