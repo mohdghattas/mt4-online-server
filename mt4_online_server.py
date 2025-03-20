@@ -1,219 +1,203 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import psycopg2
-import logging
-import os
-import json
-import re
+//+------------------------------------------------------------------+
+//|                    MT4 Account Monitor EA                       |
+//|      Sends account metrics via HTTP WebRequest (JSON)           |
+//+------------------------------------------------------------------+
+#property strict
+#include <stdlib.mqh>
+#include <stderror.mqh>
 
-app = Flask(__name__)
-CORS(app)
+// API URL
+#define SERVER_URL "https://mt4-server.up.railway.app/api/mt4data"
+#define TIMEOUT 5000
+#define IC_MARKETS_BROKER "Raw Trading Ltd"
+#define OP_BALANCE 6
+#define OP_CREDIT 7
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
+int OnInit()
+{
+   Print(" EA Initialized.");
+   EventSetTimer(60);
+   return INIT_SUCCEEDED;
+}
 
-DB_URL = os.getenv("DATABASE_URL")
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   Print(" EA Deinitialized.");
+}
 
-# Database connection
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(DB_URL, sslmode="require")
-        return conn
-    except Exception as e:
-        logger.error(f"Database connection failed: {e}")
-        return None
+//+------------------------------------------------------------------+
+//| MAIN TIMER FUNCTION                                             |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   Print(" Sending data...");
+   SendAccountMetrics();
+}
 
-# Create the accounts table if it doesn't exist
-def create_table():
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Cannot create table: No database connection")
-        return
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                broker TEXT NOT NULL,
-                account_number BIGINT PRIMARY KEY,
-                balance DOUBLE PRECISION DEFAULT 0,
-                equity DOUBLE PRECISION DEFAULT 0,
-                margin_used DOUBLE PRECISION DEFAULT 0,
-                free_margin DOUBLE PRECISION DEFAULT 0,
-                margin_percent DOUBLE PRECISION DEFAULT 0,
-                profit_loss DOUBLE PRECISION DEFAULT 0,
-                realized_pl_daily DOUBLE PRECISION DEFAULT 0,
-                realized_pl_weekly DOUBLE PRECISION DEFAULT 0,
-                realized_pl_monthly DOUBLE PRECISION DEFAULT 0,
-                realized_pl_yearly DOUBLE PRECISION DEFAULT 0,
-                realized_pl_alltime DOUBLE PRECISION DEFAULT 0,
-                deposits_alltime DOUBLE PRECISION DEFAULT 0,
-                withdrawals_alltime DOUBLE PRECISION DEFAULT 0,
-                holding_fee_daily DOUBLE PRECISION DEFAULT 0,
-                holding_fee_weekly DOUBLE PRECISION DEFAULT 0,
-                holding_fee_monthly DOUBLE PRECISION DEFAULT 0,
-                holding_fee_yearly DOUBLE PRECISION DEFAULT 0,
-                holding_fee_alltime DOUBLE PRECISION DEFAULT 0,
-                open_charts INTEGER DEFAULT 0,
-                empty_charts INTEGER DEFAULT 0,
-                open_trades INTEGER DEFAULT 0,
-                autotrading BOOLEAN DEFAULT FALSE
-            );
-        """)
-        conn.commit()
-        logger.info("Accounts table created or already exists")
-    except Exception as e:
-        logger.error(f"Table creation failed: {e}")
-    finally:
-        cur.close()
-        conn.close()
+//+------------------------------------------------------------------+
+double CalculateRealizedPL(datetime periodStart)
+{
+   double pl = 0.0;
+   for (int i = OrdersHistoryTotal() - 1; i >= 0; i--)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
+      {
+         if ((OrderType() == OP_BUY || OrderType() == OP_SELL) && (OrderCloseTime() >= periodStart))
+         {
+            pl += OrderProfit() + OrderSwap() + OrderCommission();
+         }
+      }
+   }
+   return pl;
+}
 
-# Ensure all columns exist
-def ensure_columns():
-    expected_columns = {
-        "realized_pl_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "deposits_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "withdrawals_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_daily": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_weekly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_monthly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_yearly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_alltime": "DOUBLE PRECISION DEFAULT 0"
-    }
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Cannot ensure columns: No database connection")
-        return
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts';")
-        existing_columns = {row[0] for row in cur.fetchall()}
-        for column, col_type in expected_columns.items():
-            if column not in existing_columns:
-                logger.info(f"Adding missing column: {column}")
-                cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {column} {col_type};")
-        conn.commit()
-        logger.info("All expected columns ensured")
-    except Exception as e:
-        logger.error(f"Column check/creation failed: {e}")
-    finally:
-        cur.close()
-        conn.close()
+double CalculateTransactions(datetime periodStart, bool isDeposit, bool holdingFee = false)
+{
+   double total = 0.0;
+   for (int i = OrdersHistoryTotal() - 1; i >= 0; i--)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
+      {
+         int type = OrderType();
+         if (type == OP_BALANCE && OrderCloseTime() >= periodStart)
+         {
+            string comment = OrderComment();
+            bool isHoldingFee = StringFind(comment, "Holding Fee") >= 0;
 
-# Clean raw data to remove non-printable characters
-def clean_json_string(raw_data):
-    decoded = raw_data.decode("utf-8", errors="replace")
-    cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
-    return cleaned.strip()
+            if (holdingFee && isHoldingFee)
+               total += OrderProfit();
 
-# API Endpoint
-@app.route("/api/mt4data", methods=["POST"])
-def receive_mt4_data():
-    try:
-        raw_data = clean_json_string(request.data)
-        logger.debug(f"Raw Request Data: {raw_data}")
-        json_data = json.loads(raw_data)
+            if (!holdingFee && !isHoldingFee)
+            {
+               if (isDeposit && OrderProfit() > 0) total += OrderProfit();
+               if (!isDeposit && OrderProfit() < 0) total += OrderProfit();
+            }
+         }
+      }
+   }
+   return total;
+}
 
-        required_fields = [
-            "broker", "account_number", "balance", "equity", "margin_used",
-            "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
-            "realized_pl_weekly", "realized_pl_monthly", "realized_pl_yearly",
-            "realized_pl_alltime", "deposits_alltime", "withdrawals_alltime",
-            "holding_fee_daily", "holding_fee_weekly", "holding_fee_monthly",
-            "holding_fee_yearly", "holding_fee_alltime", "open_charts",
-            "empty_charts", "open_trades", "autotrading"
-        ]
-        
-        # Add default values for missing fields
-        for field in required_fields:
-            if field not in json_data:
-                default_value = 0.0 if "fee" in field or "pl" in field or "margin" in field or field in ["balance", "equity", "profit_loss"] else 0 if field in ["open_charts", "empty_charts", "open_trades"] else False if field == "autotrading" else ""
-                json_data[field] = default_value
-                logger.warning(f"Field {field} missing, using default: {default_value}")
+datetime GetStartOfWeek()
+{
+   int dayOfWeek = TimeDayOfWeek(TimeCurrent());
+   int daysSinceMonday = (dayOfWeek == 0) ? 6 : dayOfWeek - 1;
+   return TimeCurrent() - daysSinceMonday * 86400;
+}
 
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO accounts (
-                broker, account_number, balance, equity, margin_used, free_margin,
-                margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                realized_pl_monthly, realized_pl_yearly, realized_pl_alltime,
-                deposits_alltime, withdrawals_alltime,
-                holding_fee_daily, holding_fee_weekly, holding_fee_monthly,
-                holding_fee_yearly, holding_fee_alltime, open_charts,
-                empty_charts, open_trades, autotrading
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (account_number) DO UPDATE SET
-                broker = EXCLUDED.broker,
-                balance = EXCLUDED.balance,
-                equity = EXCLUDED.equity,
-                margin_used = EXCLUDED.margin_used,
-                free_margin = EXCLUDED.free_margin,
-                margin_percent = EXCLUDED.margin_percent,
-                profit_loss = EXCLUDED.profit_loss,
-                realized_pl_daily = EXCLUDED.realized_pl_daily,
-                realized_pl_weekly = EXCLUDED.realized_pl_weekly,
-                realized_pl_monthly = EXCLUDED.realized_pl_monthly,
-                realized_pl_yearly = EXCLUDED.realized_pl_yearly,
-                realized_pl_alltime = EXCLUDED.realized_pl_alltime,
-                deposits_alltime = EXCLUDED.deposits_alltime,
-                withdrawals_alltime = EXCLUDED.withdrawals_alltime,
-                holding_fee_daily = EXCLUDED.holding_fee_daily,
-                holding_fee_weekly = EXCLUDED.holding_fee_weekly,
-                holding_fee_monthly = EXCLUDED.holding_fee_monthly,
-                holding_fee_yearly = EXCLUDED.holding_fee_yearly,
-                holding_fee_alltime = EXCLUDED.holding_fee_alltime,
-                open_charts = EXCLUDED.open_charts,
-                empty_charts = EXCLUDED.empty_charts,
-                open_trades = EXCLUDED.open_trades,
-                autotrading = EXCLUDED.autotrading;
-        """, tuple(json_data[field] for field in required_fields))
+datetime GetStartOfMonth() { return StringToTime(StringFormat("%d.%02d.01 00:00", TimeYear(TimeCurrent()), TimeMonth(TimeCurrent()))); }
+datetime GetStartOfYear() { return StringToTime(StringFormat("%d.01.01 00:00", TimeYear(TimeCurrent()))); }
 
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info(f"✅ Data stored successfully for account {json_data['account_number']}")
-        return jsonify({"message": "Data stored successfully"}), 200
+//+------------------------------------------------------------------+
+void SendAccountMetrics()
+{
+   string broker = AccountCompany();
+   double balance = AccountBalance();
+   double equity = AccountEquity();
+   double marginUsed = AccountMargin();
+   double freeMargin = AccountFreeMargin();
+   double marginPercent = (marginUsed > 0) ? (equity / marginUsed) * 100.0 : 0.0;
+   double profitLoss = equity - balance;
+   int openTrades = OrdersTotal();
+   int openCharts = CountOpenCharts();
+   int emptyCharts = CountEmptyCharts();
+   int accountNumber = AccountNumber();
+   bool autotrading = TerminalInfoInteger(TERMINAL_TRADE_ALLOWED);
 
-    except Exception as e:
-        logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+   datetime weekStart = GetStartOfWeek();
+   datetime monthStart = GetStartOfMonth();
+   datetime yearStart = GetStartOfYear();
 
-@app.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                   realized_pl_monthly, realized_pl_yearly, realized_pl_alltime,
-                   deposits_alltime, withdrawals_alltime, holding_fee_daily, 
-                   holding_fee_weekly, holding_fee_monthly, holding_fee_yearly,
-                   holding_fee_alltime, open_charts, empty_charts, open_trades, autotrading
-            FROM accounts;
-        """)
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        result = [dict(zip(columns, row)) for row in rows]
-        logger.debug(f"Fetched accounts: {json.dumps(result)}")  # Debug: Log fetched data
-        cur.close()
-        conn.close()
-        return jsonify({"accounts": result})
-    except Exception as e:
-        logger.error(f"API Fetch Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+   double realizedPLDaily = CalculateRealizedPL(TimeCurrent() - 86400);
+   double realizedPLWeekly = CalculateRealizedPL(weekStart);
+   double realizedPLMonthly = CalculateRealizedPL(monthStart);
+   double realizedPLYearly = CalculateRealizedPL(yearStart);
+   double realizedPLAllTime = CalculateRealizedPL(0);  // Ensure this is always calculated
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "404 Not Found"}), 404
+   double depositsAllTime = CalculateTransactions(0, true);
+   double withdrawalsAllTime = CalculateTransactions(0, false);
 
-# Run table creation and column checks on startup
-create_table()
-ensure_columns()
+   double holdingFeeDaily = (broker == IC_MARKETS_BROKER) ? CalculateTransactions(TimeCurrent() - 86400, false, true) : 0.0;
+   double holdingFeeWeekly = (broker == IC_MARKETS_BROKER) ? CalculateTransactions(weekStart, false, true) : 0.0;
+   double holdingFeeMonthly = (broker == IC_MARKETS_BROKER) ? CalculateTransactions(monthStart, false, true) : 0.0;
+   double holdingFeeYearly = (broker == IC_MARKETS_BROKER) ? CalculateTransactions(yearStart, false, true) : 0.0;
+   double holdingFeeAllTime = (broker == IC_MARKETS_BROKER) ? CalculateTransactions(0, false, true) : 0.0;
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+   string json = "{";
+   json += "\"broker\":\"" + broker + "\",";
+   json += "\"account_number\":" + IntegerToString(accountNumber) + ",";
+   json += "\"balance\":" + DoubleToString(balance, 2) + ",";
+   json += "\"equity\":" + DoubleToString(equity, 2) + ",";
+   json += "\"margin_used\":" + DoubleToString(marginUsed, 2) + ",";
+   json += "\"free_margin\":" + DoubleToString(freeMargin, 2) + ",";
+   json += "\"margin_percent\":" + DoubleToString(marginPercent, 2) + ",";
+   json += "\"profit_loss\":" + DoubleToString(profitLoss, 2) + ",";
+   json += "\"realized_pl_daily\":" + DoubleToString(realizedPLDaily, 2) + ",";
+   json += "\"realized_pl_weekly\":" + DoubleToString(realizedPLWeekly, 2) + ",";
+   json += "\"realized_pl_monthly\":" + DoubleToString(realizedPLMonthly, 2) + ",";
+   json += "\"realized_pl_yearly\":" + DoubleToString(realizedPLYearly, 2) + ",";
+   json += "\"realized_pl_alltime\":" + DoubleToString(realizedPLAllTime, 2) + ",";
+   json += "\"deposits_alltime\":" + DoubleToString(depositsAllTime, 2) + ",";
+   json += "\"withdrawals_alltime\":" + DoubleToString(withdrawalsAllTime, 2) + ",";
+   json += "\"holding_fee_daily\":" + DoubleToString(holdingFeeDaily, 2) + ",";
+   json += "\"holding_fee_weekly\":" + DoubleToString(holdingFeeWeekly, 2) + ",";
+   json += "\"holding_fee_monthly\":" + DoubleToString(holdingFeeMonthly, 2) + ",";
+   json += "\"holding_fee_yearly\":" + DoubleToString(holdingFeeYearly, 2) + ",";
+   json += "\"holding_fee_alltime\":" + DoubleToString(holdingFeeAllTime, 2) + ",";
+   json += "\"open_charts\":" + IntegerToString(openCharts) + ",";
+   json += "\"empty_charts\":" + IntegerToString(emptyCharts) + ",";
+   json += "\"open_trades\":" + IntegerToString(openTrades) + ",";
+   json += "\"autotrading\":" + (autotrading ? "true" : "false");
+   json += "}";
+
+   Print(" Sending JSON: ", json);
+   Print(" JSON Length: ", StringLen(json));
+
+   uchar httpRequest[];
+   StringToCharArray(json, httpRequest, 0, StringLen(json), CP_UTF8);
+   Print(" HTTP Request Array Length: ", ArraySize(httpRequest));
+
+   string headers = "Content-Type: application/json\r\n";
+   uchar httpResponse[];
+   string responseHeaders;
+
+   ResetLastError();
+   int result = WebRequest("POST", SERVER_URL, headers, TIMEOUT, httpRequest, httpResponse, responseHeaders);
+
+   if (result > 0)
+   {
+      string response = CharArrayToString(httpResponse);
+      Print(" Data sent successfully. Response: ", response);
+   }
+   else
+   {
+      Print(" WebRequest failed with error: ", GetLastError());
+   }
+}
+
+//+------------------------------------------------------------------+
+int CountOpenCharts()
+{
+   int count = 0;
+   long chartID = ChartFirst();
+   while (chartID >= 0)
+   {
+      count++;
+      chartID = ChartNext(chartID);
+   }
+   return count;
+}
+
+int CountEmptyCharts()
+{
+   int empty = 0;
+   long chartID = ChartFirst();
+   while (chartID >= 0)
+   {
+      string sym = ChartSymbol(chartID);
+      if (sym == "") empty++;
+      chartID = ChartNext(chartID);
+   }
+   return empty;
+}
