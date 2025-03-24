@@ -14,7 +14,6 @@ logger = logging.getLogger("mt4_online_server")
 
 DB_URL = os.getenv("DATABASE_URL")
 
-# Database connection
 def get_db_connection():
     try:
         conn = psycopg2.connect(DB_URL, sslmode="require")
@@ -22,6 +21,10 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
         return None
+
+# -------------------------
+# EXISTING ROUTES + TABLES
+# -------------------------
 
 # Create the accounts table if it doesn't exist
 def create_table():
@@ -99,19 +102,14 @@ def ensure_columns():
         cur.close()
         conn.close()
 
-# Clean raw data to remove non-printable characters
-def clean_json_string(raw_data):
-    # Decode with replacement for invalid chars, then remove non-printable chars except necessary ones
-    decoded = raw_data.decode("utf-8", errors="replace")
-    # Keep only printable characters (ASCII 32-126) and common JSON chars (e.g., {}, [], ", etc.)
-    cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
-    return cleaned.strip()
+# ----------------------
+# API ENDPOINTS
+# ----------------------
 
-# API Endpoint
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
-        raw_data = clean_json_string(request.data)  # Fix: Enhanced cleaning
+        raw_data = clean_json_string(request.data)
         logger.debug(f"Raw Request Data: {raw_data}")
         json_data = json.loads(raw_data)
 
@@ -204,13 +202,62 @@ def get_accounts():
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    account_number = request.args.get('account')
+    broker = request.args.get('broker')
+    start_date = request.args.get('start')
+    end_date = request.args.get('end')
+
+    query = "SELECT * FROM history WHERE 1=1"
+    params = []
+
+    if account_number:
+        query += " AND account_number = %s"
+        params.append(account_number)
+
+    if broker:
+        query += " AND broker = %s"
+        params.append(broker)
+
+    if start_date:
+        query += " AND snapshot_time >= %s"
+        params.append(start_date)
+
+    if end_date:
+        query += " AND snapshot_time <= %s"
+        params.append(end_date)
+
+    query += " ORDER BY snapshot_time DESC"
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+        return jsonify({"history": [dict(zip(columns, row)) for row in rows]})
+    except Exception as e:
+        logger.error(f"API History Fetch Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
-# Run table creation and column checks on startup
+# -------------------
 create_table()
 ensure_columns()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
+# -------------------
+# UTILITIES
+# -------------------
+def clean_json_string(raw_data):
+    decoded = raw_data.decode("utf-8", errors="replace")
+    cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
+    return cleaned.strip()
