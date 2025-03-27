@@ -6,7 +6,7 @@ import os
 import json
 import re
 from datetime import datetime
-import pytz  # Add pytz for timezone handling
+import pytz
 
 app = Flask(__name__)
 CORS(app)
@@ -16,7 +16,6 @@ logger = logging.getLogger("mt4_online_server")
 
 DB_URL = os.getenv("DATABASE_URL")
 
-# Database connection
 def get_db_connection():
     try:
         conn = psycopg2.connect(DB_URL, sslmode="require")
@@ -25,7 +24,6 @@ def get_db_connection():
         logger.error(f"Database connection failed: {e}")
         return None
 
-# Create tables if they don’t exist (assuming history table already exists)
 def create_tables():
     conn = get_db_connection()
     if not conn:
@@ -75,22 +73,10 @@ def create_tables():
                 mask_timer TEXT DEFAULT '300',
                 font_size TEXT DEFAULT '14',
                 notes JSON,
-                logs JSON
+                logs JSON,
+                broker_offsets JSON DEFAULT '{}'
             );
         """)
-        # Assuming history table exists; if not, uncomment and adjust schema as needed
-        # cur.execute("""
-        #     CREATE TABLE IF NOT EXISTS history (
-        #         id SERIAL PRIMARY KEY,
-        #         account_number BIGINT NOT NULL,
-        #         timestamp TIMESTAMP NOT NULL,
-        #         balance DOUBLE PRECISION,
-        #         equity DOUBLE PRECISION,
-        #         profit_loss DOUBLE PRECISION,
-        #         realized_pl_daily DOUBLE PRECISION,
-        #         FOREIGN KEY (account_number) REFERENCES accounts(account_number)
-        #     );
-        # """)
         conn.commit()
         logger.info("Tables created or already exist: accounts, settings")
     except Exception as e:
@@ -99,7 +85,6 @@ def create_tables():
         cur.close()
         conn.close()
 
-# Ensure all columns exist in accounts table
 def ensure_columns():
     expected_columns = {
         "realized_pl_alltime": "DOUBLE PRECISION DEFAULT 0",
@@ -131,13 +116,11 @@ def ensure_columns():
         cur.close()
         conn.close()
 
-# Clean raw data
 def clean_json_string(raw_data):
     decoded = raw_data.decode("utf-8", errors="replace")
     cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
     return cleaned.strip()
 
-# API Endpoint to receive MT4 data
 @app.route("/api/mt4data", methods=["POST"])
 def receive_mt4_data():
     try:
@@ -210,7 +193,6 @@ def receive_mt4_data():
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
-# API Endpoint to retrieve accounts data
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
     try:
@@ -236,7 +218,6 @@ def get_accounts():
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to retrieve settings
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     try:
@@ -247,7 +228,7 @@ def get_settings():
         cur.execute("""
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                   mask_timer, font_size, notes, logs
+                   mask_timer, font_size, notes, logs, broker_offsets
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -261,7 +242,6 @@ def get_settings():
         logger.error(f"Settings Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to save settings
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     try:
@@ -274,8 +254,8 @@ def save_settings():
             INSERT INTO settings (
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                mask_timer, font_size, notes, logs
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                mask_timer, font_size, notes, logs, broker_offsets
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -288,7 +268,8 @@ def save_settings():
                 mask_timer = EXCLUDED.mask_timer,
                 font_size = EXCLUDED.font_size,
                 notes = EXCLUDED.notes,
-                logs = EXCLUDED.logs;
+                logs = EXCLUDED.logs,
+                broker_offsets = EXCLUDED.broker_offsets;
         """, (
             json.dumps(settings.get('sortState', {})),
             settings.get('isNumbersMasked', False),
@@ -301,7 +282,8 @@ def save_settings():
             settings.get('maskTimer', '300'),
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
-            json.dumps(settings.get('logs', []))
+            json.dumps(settings.get('logs', [])),
+            json.dumps(settings.get('brokerOffsets', {}))
         ))
         conn.commit()
         cur.close()
@@ -312,35 +294,55 @@ def save_settings():
         logger.error(f"Settings Save Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to save historical data (assuming existing history table)
 @app.route("/api/history", methods=["POST"])
 def save_history():
     try:
         data = request.get_json()
         if not isinstance(data, list):
-            data = [data]  # Handle single or multiple records
+            data = [data]
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
-        # Assuming history table has these columns; adjust if different
         for entry in data:
-            # Convert timestamp to UTC
             local_tz = pytz.timezone('Asia/Beirut')
             local_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
             utc_time = local_time.astimezone(pytz.UTC)
             cur.execute("""
-                INSERT INTO history (account_number, timestamp, balance, equity, profit_loss, realized_pl_daily)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO history (
+                    account_number, balance, equity, margin_used, free_margin, margin_level,
+                    open_trade, profit_loss, open_charts, deposit_withdrawal, margin_percent,
+                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly,
+                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime, realized_pl_alltime,
+                    holding_fee_daily, broker, snapshot_time, last_update
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
-                entry['account_number'],
-                utc_time,
+                entry.get('account_number'),
                 entry.get('balance'),
                 entry.get('equity'),
+                entry.get('margin_used'),
+                entry.get('free_margin'),
+                entry.get('margin_level', entry.get('margin_percent', 0)),  # Assuming margin_level is margin_percent
+                entry.get('open_trade', entry.get('open_trades', 0)),  # Mapping open_trades to open_trade
                 entry.get('profit_loss'),
-                entry.get('realized_pl_daily')
+                entry.get('open_charts'),
+                entry.get('deposit_withdrawal', 0),  # Not in accounts, default to 0
+                entry.get('margin_percent'),
+                entry.get('realized_pl_daily'),
+                entry.get('realized_pl_weekly'),
+                entry.get('realized_pl_monthly'),
+                entry.get('realized_pl_yearly'),
+                entry.get('autotrading'),
+                entry.get('empty_charts'),
+                entry.get('deposits_alltime'),
+                entry.get('withdrawals_alltime'),
+                entry.get('realized_pl_alltime'),
+                entry.get('holding_fee_daily'),
+                entry.get('broker'),
+                utc_time,
+                utc_time
             ))
         conn.commit()
         cur.close()
@@ -351,7 +353,6 @@ def save_history():
         logger.error(f"History Save Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to retrieve historical data
 @app.route("/api/history", methods=["GET"])
 def get_history():
     try:
@@ -363,20 +364,19 @@ def get_history():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        query = "SELECT h.account_number, h.timestamp, h.balance, h.equity, h.profit_loss, h.realized_pl_daily, a.broker " \
-                "FROM history h JOIN accounts a ON h.account_number = a.account_number WHERE 1=1"
+        query = "SELECT * FROM history WHERE 1=1"
         params = []
         if account:
-            query += " AND h.account_number = %s"
+            query += " AND account_number = %s"
             params.append(account)
         if start:
-            query += " AND h.timestamp >= %s"
+            query += " AND snapshot_time >= %s"
             params.append(start)
         if end:
-            query += " AND h.timestamp <= %s"
+            query += " AND snapshot_time <= %s"
             params.append(end)
         if broker:
-            query += " AND a.broker = %s"
+            query += " AND broker = %s"
             params.append(broker)
         cur.execute(query, params)
         rows = cur.fetchall()
@@ -392,7 +392,6 @@ def get_history():
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
-# Run table creation and column checks on startup
 create_tables()
 ensure_columns()
 
