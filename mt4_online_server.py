@@ -5,6 +5,8 @@ import logging
 import os
 import json
 import re
+from datetime import datetime
+import pytz  # Add pytz for timezone handling
 
 app = Flask(__name__)
 CORS(app)
@@ -23,7 +25,7 @@ def get_db_connection():
         logger.error(f"Database connection failed: {e}")
         return None
 
-# Create tables if they don’t exist
+# Create tables if they don’t exist (assuming history table already exists)
 def create_tables():
     conn = get_db_connection()
     if not conn:
@@ -31,7 +33,6 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        # Accounts table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
@@ -60,7 +61,6 @@ def create_tables():
                 autotrading BOOLEAN DEFAULT FALSE
             );
         """)
-        # Settings table (new for notes, logs, and dashboard settings)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 user_id TEXT PRIMARY KEY,
@@ -78,6 +78,19 @@ def create_tables():
                 logs JSON
             );
         """)
+        # Assuming history table exists; if not, uncomment and adjust schema as needed
+        # cur.execute("""
+        #     CREATE TABLE IF NOT EXISTS history (
+        #         id SERIAL PRIMARY KEY,
+        #         account_number BIGINT NOT NULL,
+        #         timestamp TIMESTAMP NOT NULL,
+        #         balance DOUBLE PRECISION,
+        #         equity DOUBLE PRECISION,
+        #         profit_loss DOUBLE PRECISION,
+        #         realized_pl_daily DOUBLE PRECISION,
+        #         FOREIGN KEY (account_number) REFERENCES accounts(account_number)
+        #     );
+        # """)
         conn.commit()
         logger.info("Tables created or already exist: accounts, settings")
     except Exception as e:
@@ -118,7 +131,7 @@ def ensure_columns():
         cur.close()
         conn.close()
 
-# Clean raw data to remove non-printable characters
+# Clean raw data
 def clean_json_string(raw_data):
     decoded = raw_data.decode("utf-8", errors="replace")
     cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
@@ -223,7 +236,7 @@ def get_accounts():
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to retrieve settings (notes, logs, etc.)
+# API Endpoint to retrieve settings
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     try:
@@ -243,12 +256,12 @@ def get_settings():
         if settings:
             columns = [desc[0] for desc in cur.description]
             return jsonify(dict(zip(columns, settings)))
-        return jsonify({})  # Return empty object if no settings exist
+        return jsonify({})
     except Exception as e:
         logger.error(f"Settings Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# API Endpoint to save settings (notes, logs, etc.)
+# API Endpoint to save settings
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     try:
@@ -299,12 +312,81 @@ def save_settings():
         logger.error(f"Settings Save Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# Placeholder for history endpoint (not implemented yet)
+# API Endpoint to save historical data (assuming existing history table)
+@app.route("/api/history", methods=["POST"])
+def save_history():
+    try:
+        data = request.get_json()
+        if not isinstance(data, list):
+            data = [data]  # Handle single or multiple records
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        cur = conn.cursor()
+
+        # Assuming history table has these columns; adjust if different
+        for entry in data:
+            # Convert timestamp to UTC
+            local_tz = pytz.timezone('Asia/Beirut')
+            local_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
+            utc_time = local_time.astimezone(pytz.UTC)
+            cur.execute("""
+                INSERT INTO history (account_number, timestamp, balance, equity, profit_loss, realized_pl_daily)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                entry['account_number'],
+                utc_time,
+                entry.get('balance'),
+                entry.get('equity'),
+                entry.get('profit_loss'),
+                entry.get('realized_pl_daily')
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"History saved for {len(data)} accounts")
+        return jsonify({"message": "History saved"}), 200
+    except Exception as e:
+        logger.error(f"History Save Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# API Endpoint to retrieve historical data
 @app.route("/api/history", methods=["GET"])
 def get_history():
-    # TODO: Implement history tracking if required
-    # Requires a new table (e.g., account_history) with timestamped snapshots
-    return jsonify({"history": [], "message": "History endpoint not implemented"}), 501
+    try:
+        account = request.args.get('account')
+        start = request.args.get('start')
+        end = request.args.get('end')
+        broker = request.args.get('broker')
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        cur = conn.cursor()
+        query = "SELECT h.account_number, h.timestamp, h.balance, h.equity, h.profit_loss, h.realized_pl_daily, a.broker " \
+                "FROM history h JOIN accounts a ON h.account_number = a.account_number WHERE 1=1"
+        params = []
+        if account:
+            query += " AND h.account_number = %s"
+            params.append(account)
+        if start:
+            query += " AND h.timestamp >= %s"
+            params.append(start)
+        if end:
+            query += " AND h.timestamp <= %s"
+            params.append(end)
+        if broker:
+            query += " AND a.broker = %s"
+            params.append(broker)
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+        return jsonify({"history": [dict(zip(columns, row)) for row in rows]})
+    except Exception as e:
+        logger.error(f"History Fetch Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
