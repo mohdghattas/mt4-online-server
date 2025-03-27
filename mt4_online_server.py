@@ -88,7 +88,6 @@ def create_tables():
                 mask_timer TEXT DEFAULT '300',
                 font_size TEXT DEFAULT '14',
                 notes JSON,
-                logs JSON,
                 broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}'
             );
         """)
@@ -255,7 +254,10 @@ def get_settings():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("""
-            SELECT * FROM settings WHERE user_id = 'default';
+            SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
+                   main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
+                   mask_timer, font_size, notes, broker_offsets
+            FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
         cur.close()
@@ -280,8 +282,8 @@ def save_settings():
             INSERT INTO settings (
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                mask_timer, font_size, notes, logs, broker_offsets
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                mask_timer, font_size, notes, broker_offsets
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -294,7 +296,6 @@ def save_settings():
                 mask_timer = EXCLUDED.mask_timer,
                 font_size = EXCLUDED.font_size,
                 notes = EXCLUDED.notes,
-                logs = EXCLUDED.logs,
                 broker_offsets = EXCLUDED.broker_offsets;
         """, (
             json.dumps(settings.get('sortState', {})),
@@ -308,7 +309,6 @@ def save_settings():
             settings.get('maskTimer', '300'),
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
-            json.dumps(settings.get('logs', [])),
             json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}))
         ))
         conn.commit()
@@ -355,7 +355,7 @@ def save_history():
                 entry.get('open_trades', 0),
                 entry.get('profit_loss'),
                 entry.get('open_charts'),
-                0,  # deposit_withdrawal not in accounts
+                0,
                 entry.get('margin_percent'),
                 entry.get('realized_pl_daily'),
                 entry.get('realized_pl_weekly'),
@@ -368,9 +368,9 @@ def save_history():
                 entry.get('realized_pl_alltime'),
                 entry.get('holding_fee_daily'),
                 entry.get('broker'),
-                None,  # traded_pairs
-                None,  # open_pairs_charts
-                None,  # ea_names
+                None,
+                None,
+                None,
                 utc_time,
                 utc_time
             ))
