@@ -56,7 +56,22 @@ def create_tables():
                 open_charts INTEGER DEFAULT 0,
                 empty_charts INTEGER DEFAULT 0,
                 open_trades INTEGER DEFAULT 0,
-                autotrading BOOLEAN DEFAULT FALSE
+                autotrading BOOLEAN DEFAULT FALSE,
+                swap_daily DOUBLE PRECISION DEFAULT 0,
+                swap_weekly DOUBLE PRECISION DEFAULT 0,
+                swap_monthly DOUBLE PRECISION DEFAULT 0,
+                swap_yearly DOUBLE PRECISION DEFAULT 0,
+                swap_alltime DOUBLE PRECISION DEFAULT 0,
+                deposits_daily DOUBLE PRECISION DEFAULT 0,
+                deposits_weekly DOUBLE PRECISION DEFAULT 0,
+                deposits_monthly DOUBLE PRECISION DEFAULT 0,
+                deposits_yearly DOUBLE PRECISION DEFAULT 0,
+                withdrawals_daily DOUBLE PRECISION DEFAULT 0,
+                withdrawals_weekly DOUBLE PRECISION DEFAULT 0,
+                withdrawals_monthly DOUBLE PRECISION DEFAULT 0,
+                withdrawals_yearly DOUBLE PRECISION DEFAULT 0,
+                prev_day_pl DOUBLE PRECISION DEFAULT 0,
+                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0
             );
         """)
         cur.execute("""
@@ -74,44 +89,45 @@ def create_tables():
                 font_size TEXT DEFAULT '14',
                 notes JSON,
                 logs JSON,
-                broker_offsets JSON DEFAULT '{}'
+                broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}'
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id SERIAL PRIMARY KEY,
+                account_number BIGINT,
+                balance DOUBLE PRECISION,
+                equity DOUBLE PRECISION,
+                margin_used DOUBLE PRECISION,
+                free_margin DOUBLE PRECISION,
+                margin_level DOUBLE PRECISION,
+                open_trade INTEGER,
+                profit_loss DOUBLE PRECISION,
+                open_charts INTEGER,
+                deposit_withdrawal DOUBLE PRECISION,
+                margin_percent DOUBLE PRECISION,
+                realized_pl_daily DOUBLE PRECISION,
+                realized_pl_weekly DOUBLE PRECISION,
+                realized_pl_monthly DOUBLE PRECISION,
+                realized_pl_yearly DOUBLE PRECISION,
+                autotrading BOOLEAN,
+                empty_charts INTEGER,
+                deposits_alltime DOUBLE PRECISION,
+                withdrawals_alltime DOUBLE PRECISION,
+                realized_pl_alltime DOUBLE PRECISION,
+                holding_fee_daily DOUBLE PRECISION,
+                broker TEXT,
+                traded_pairs TEXT,
+                open_pairs_charts TEXT,
+                ea_names TEXT,
+                snapshot_time TIMESTAMP WITH TIME ZONE,
+                last_update TIMESTAMP WITH TIME ZONE
             );
         """)
         conn.commit()
-        logger.info("Tables created or already exist: accounts, settings")
+        logger.info("Tables created or already exist: accounts, settings, history")
     except Exception as e:
         logger.error(f"Table creation failed: {e}")
-    finally:
-        cur.close()
-        conn.close()
-
-def ensure_columns():
-    expected_columns = {
-        "realized_pl_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "deposits_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "withdrawals_alltime": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_daily": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_weekly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_monthly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_yearly": "DOUBLE PRECISION DEFAULT 0",
-        "holding_fee_alltime": "DOUBLE PRECISION DEFAULT 0"
-    }
-    conn = get_db_connection()
-    if not conn:
-        logger.error("Cannot ensure columns: No database connection")
-        return
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts';")
-        existing_columns = {row[0] for row in cur.fetchall()}
-        for column, col_type in expected_columns.items():
-            if column not in existing_columns:
-                logger.info(f"Adding missing column to accounts: {column}")
-                cur.execute(f"ALTER TABLE accounts ADD COLUMN IF NOT EXISTS {column} {col_type};")
-        conn.commit()
-        logger.info("All expected columns ensured in accounts table")
-    except Exception as e:
-        logger.error(f"Column check/creation failed: {e}")
     finally:
         cur.close()
         conn.close()
@@ -127,7 +143,6 @@ def receive_mt4_data():
         raw_data = clean_json_string(request.data)
         logger.debug(f"Raw Request Data: {raw_data}")
         json_data = json.loads(raw_data)
-
         required_fields = [
             "broker", "account_number", "balance", "equity", "margin_used",
             "free_margin", "margin_percent", "profit_loss", "realized_pl_daily",
@@ -135,34 +150,40 @@ def receive_mt4_data():
             "realized_pl_alltime", "deposits_alltime", "withdrawals_alltime",
             "holding_fee_daily", "holding_fee_weekly", "holding_fee_monthly",
             "holding_fee_yearly", "holding_fee_alltime", "open_charts",
-            "empty_charts", "open_trades", "autotrading"
+            "empty_charts", "open_trades", "autotrading", "swap_daily",
+            "swap_weekly", "swap_monthly", "swap_yearly", "swap_alltime",
+            "deposits_daily", "deposits_weekly", "deposits_monthly",
+            "deposits_yearly", "withdrawals_daily", "withdrawals_weekly",
+            "withdrawals_monthly", "withdrawals_yearly", "prev_day_pl",
+            "prev_day_holding_fee"
         ]
-
         for field in required_fields:
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
-
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
-
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
                 margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
                 realized_pl_monthly, realized_pl_yearly, realized_pl_alltime,
-                deposits_alltime, withdrawals_alltime,
-                holding_fee_daily, holding_fee_weekly, holding_fee_monthly,
-                holding_fee_yearly, holding_fee_alltime, open_charts,
-                empty_charts, open_trades, autotrading
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                deposits_alltime, withdrawals_alltime, holding_fee_daily,
+                holding_fee_weekly, holding_fee_monthly, holding_fee_yearly,
+                holding_fee_alltime, open_charts, empty_charts, open_trades,
+                autotrading, swap_daily, swap_weekly, swap_monthly, swap_yearly,
+                swap_alltime, deposits_daily, deposits_weekly, deposits_monthly,
+                deposits_yearly, withdrawals_daily, withdrawals_weekly,
+                withdrawals_monthly, withdrawals_yearly, prev_day_pl,
+                prev_day_holding_fee
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
-                broker = EXCLUDED.broker,
-                balance = EXCLUDED.balance,
-                equity = EXCLUDED.equity,
-                margin_used = EXCLUDED.margin_used,
+                broker = EXCLUDED.broker, balance = EXCLUDED.balance,
+                equity = EXCLUDED.equity, margin_used = EXCLUDED.margin_used,
                 free_margin = EXCLUDED.free_margin,
                 margin_percent = EXCLUDED.margin_percent,
                 profit_loss = EXCLUDED.profit_loss,
@@ -181,9 +202,23 @@ def receive_mt4_data():
                 open_charts = EXCLUDED.open_charts,
                 empty_charts = EXCLUDED.empty_charts,
                 open_trades = EXCLUDED.open_trades,
-                autotrading = EXCLUDED.autotrading;
+                autotrading = EXCLUDED.autotrading,
+                swap_daily = EXCLUDED.swap_daily,
+                swap_weekly = EXCLUDED.swap_weekly,
+                swap_monthly = EXCLUDED.swap_monthly,
+                swap_yearly = EXCLUDED.swap_yearly,
+                swap_alltime = EXCLUDED.swap_alltime,
+                deposits_daily = EXCLUDED.deposits_daily,
+                deposits_weekly = EXCLUDED.deposits_weekly,
+                deposits_monthly = EXCLUDED.deposits_monthly,
+                deposits_yearly = EXCLUDED.deposits_yearly,
+                withdrawals_daily = EXCLUDED.withdrawals_daily,
+                withdrawals_weekly = EXCLUDED.withdrawals_weekly,
+                withdrawals_monthly = EXCLUDED.withdrawals_monthly,
+                withdrawals_yearly = EXCLUDED.withdrawals_yearly,
+                prev_day_pl = EXCLUDED.prev_day_pl,
+                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
         """, tuple(json_data[field] for field in required_fields))
-
         conn.commit()
         cur.close()
         conn.close()
@@ -201,13 +236,7 @@ def get_accounts():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("""
-            SELECT broker, account_number, balance, equity, margin_used, free_margin,
-                   margin_percent, profit_loss, realized_pl_daily, realized_pl_weekly,
-                   realized_pl_monthly, realized_pl_yearly, realized_pl_alltime,
-                   deposits_alltime, withdrawals_alltime, holding_fee_daily,
-                   holding_fee_weekly, holding_fee_monthly, holding_fee_yearly,
-                   holding_fee_alltime, open_charts, empty_charts, open_trades, autotrading
-            FROM accounts;
+            SELECT * FROM accounts;
         """)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
@@ -226,10 +255,7 @@ def get_settings():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("""
-            SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
-                   main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                   mask_timer, font_size, notes, logs, broker_offsets
-            FROM settings WHERE user_id = 'default';
+            SELECT * FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
         cur.close()
@@ -283,7 +309,7 @@ def save_settings():
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
             json.dumps(settings.get('logs', [])),
-            json.dumps(settings.get('brokerOffsets', {}))
+            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}))
         ))
         conn.commit()
         cur.close()
@@ -304,19 +330,20 @@ def save_history():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-
         for entry in data:
             local_tz = pytz.timezone('Asia/Beirut')
-            local_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
-            utc_time = local_time.astimezone(pytz.UTC)
+            snapshot_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
+            utc_time = snapshot_time.astimezone(pytz.UTC)
             cur.execute("""
                 INSERT INTO history (
                     account_number, balance, equity, margin_used, free_margin, margin_level,
                     open_trade, profit_loss, open_charts, deposit_withdrawal, margin_percent,
                     realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly,
-                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime, realized_pl_alltime,
-                    holding_fee_daily, broker, snapshot_time, last_update
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime,
+                    realized_pl_alltime, holding_fee_daily, broker, traded_pairs,
+                    open_pairs_charts, ea_names, snapshot_time, last_update
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
                 entry.get('account_number'),
@@ -324,11 +351,11 @@ def save_history():
                 entry.get('equity'),
                 entry.get('margin_used'),
                 entry.get('free_margin'),
-                entry.get('margin_level', entry.get('margin_percent', 0)),  # Assuming margin_level is margin_percent
-                entry.get('open_trade', entry.get('open_trades', 0)),  # Mapping open_trades to open_trade
+                entry.get('margin_percent', 0),
+                entry.get('open_trades', 0),
                 entry.get('profit_loss'),
                 entry.get('open_charts'),
-                entry.get('deposit_withdrawal', 0),  # Not in accounts, default to 0
+                0,  # deposit_withdrawal not in accounts
                 entry.get('margin_percent'),
                 entry.get('realized_pl_daily'),
                 entry.get('realized_pl_weekly'),
@@ -341,6 +368,9 @@ def save_history():
                 entry.get('realized_pl_alltime'),
                 entry.get('holding_fee_daily'),
                 entry.get('broker'),
+                None,  # traded_pairs
+                None,  # open_pairs_charts
+                None,  # ea_names
                 utc_time,
                 utc_time
             ))
@@ -393,7 +423,6 @@ def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
 create_tables()
-ensure_columns()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
