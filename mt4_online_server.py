@@ -160,10 +160,16 @@ def receive_mt4_data():
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
+        
         conn = get_db_connection()
         if not conn:
+            logger.error("❌ No database connection")
             return jsonify({"error": "Database connection failed"}), 500
+        
+        logger.debug("Database connection established")
         cur = conn.cursor()
+        
+        logger.debug("Executing INSERT/UPDATE query")
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
@@ -218,13 +224,29 @@ def receive_mt4_data():
                 prev_day_pl = EXCLUDED.prev_day_pl,
                 prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
         """, tuple(json_data[field] for field in required_fields))
+        
+        logger.debug("Query executed, committing transaction")
         conn.commit()
+        
+        logger.debug("Transaction committed, verifying data")
+        cur.execute("SELECT account_number, balance, equity FROM accounts WHERE account_number = %s", (json_data["account_number"],))
+        result = cur.fetchone()
+        if result:
+            logger.info(f"✅ Data verified in database for account {result[0]}: balance={result[1]}, equity={result[2]}")
+        else:
+            logger.error(f"❌ Data not found in database after commit for account {json_data['account_number']}")
+            return jsonify({"error": "Data not persisted in database"}), 500
+        
         cur.close()
         conn.close()
         logger.info(f"✅ Data stored successfully for account {json_data['account_number']}")
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
+        if 'conn' in locals():
+            conn.rollback()
+            cur.close()
+            conn.close()
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/api/accounts", methods=["GET"])
@@ -234,9 +256,7 @@ def get_accounts():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        cur.execute("""
-            SELECT * FROM accounts;
-        """)
+        cur.execute("SELECT * FROM accounts;")
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         cur.close()
