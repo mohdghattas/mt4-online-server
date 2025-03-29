@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 import psycopg2
 import logging
 import os
@@ -10,6 +11,7 @@ import pytz
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")  # WebSocket support
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
@@ -31,10 +33,8 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        # Drop and recreate accounts table to ensure all columns are present
-        cur.execute("DROP TABLE IF EXISTS accounts;")
         cur.execute("""
-            CREATE TABLE accounts (
+            CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
                 account_number BIGINT PRIMARY KEY,
                 balance DOUBLE PRECISION DEFAULT 0,
@@ -75,6 +75,8 @@ def create_tables():
                 prev_day_pl DOUBLE PRECISION DEFAULT 0,
                 prev_day_holding_fee DOUBLE PRECISION DEFAULT 0
             );
+            CREATE INDEX IF NOT EXISTS idx_accounts_account_number ON accounts (account_number);
+            CREATE INDEX IF NOT EXISTS idx_accounts_broker ON accounts (broker);
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
@@ -90,7 +92,8 @@ def create_tables():
                 mask_timer TEXT DEFAULT '300',
                 font_size TEXT DEFAULT '14',
                 notes JSON,
-                broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}'
+                broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
+                alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20}'
             );
         """)
         cur.execute("""
@@ -124,9 +127,10 @@ def create_tables():
                 snapshot_time TIMESTAMP WITH TIME ZONE,
                 last_update TIMESTAMP WITH TIME ZONE
             );
+            CREATE INDEX IF NOT EXISTS idx_history_snapshot_time ON history (snapshot_time);
         """)
         conn.commit()
-        logger.info("Tables created: accounts, settings, history")
+        logger.info("Tables created with indexes")
     except Exception as e:
         logger.error(f"Table creation failed: {e}")
     finally:
@@ -162,19 +166,11 @@ def receive_mt4_data():
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
-        
-        # Convert autotrading to Python boolean
         json_data["autotrading"] = json_data["autotrading"] == "true" or json_data["autotrading"] == True
-        
         conn = get_db_connection()
         if not conn:
-            logger.error("❌ No database connection")
             return jsonify({"error": "Database connection failed"}), 500
-        
-        logger.debug("Database connection established")
         cur = conn.cursor()
-        
-        logger.debug("Executing INSERT/UPDATE query")
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
@@ -229,32 +225,38 @@ def receive_mt4_data():
                 prev_day_pl = EXCLUDED.prev_day_pl,
                 prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
         """, tuple(json_data[field] for field in required_fields))
-        
-        logger.debug("Query executed, committing transaction")
         conn.commit()
-        
-        logger.debug("Transaction committed, verifying data")
-        cur.execute("SELECT account_number, balance, equity FROM accounts WHERE account_number = %s", (json_data["account_number"],))
-        result = cur.fetchone()
-        if result:
-            logger.info(f"✅ Data verified in database for account {result[0]}: balance={result[1]}, equity={result[2]}")
-        else:
-            logger.error(f"❌ Data not found in database after commit for account {json_data['account_number']}")
-            cur.close()
-            conn.close()
-            return jsonify({"error": "Data not persisted in database"}), 500
-        
         cur.close()
         conn.close()
-        logger.info(f"✅ Data stored successfully for account {json_data['account_number']}")
+        logger.info(f"✅ Data stored for account {json_data['account_number']}")
+        # Push update via WebSocket
+        socketio.emit('account_update', json_data)
+        # Check alerts
+        check_alerts(json_data)
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
-        if 'conn' in locals():
-            conn.rollback()
-            cur.close()
-            conn.close()
         return jsonify({"error": "Internal server error"}), 500
+
+def check_alerts(account_data):
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    cur.execute("SELECT alert_thresholds FROM settings WHERE user_id = 'default';")
+    thresholds = cur.fetchone()
+    thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20}
+    alerts = []
+    if account_data['equity'] < thresholds['equity']:
+        alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
+    if account_data['profit_loss'] < thresholds['profit_loss']:
+        alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
+    if account_data['margin_percent'] < thresholds['margin_percent']:
+        alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+    if alerts:
+        socketio.emit('alert', alerts)
+    cur.close()
+    conn.close()
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
@@ -273,6 +275,71 @@ def get_accounts():
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/analytics", methods=["GET"])
+def get_analytics():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        cur = conn.cursor()
+        # Balance per Broker
+        cur.execute("""
+            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity, SUM(profit_loss) as total_pl
+            FROM accounts GROUP BY broker;
+        """)
+        balance_data = [{"broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3]} for row in cur.fetchall()]
+        # Yearly Profits per Broker
+        cur.execute("""
+            SELECT broker, SUM(realized_pl_yearly) as yearly_pl FROM accounts GROUP BY broker;
+        """)
+        yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
+        # Margin Health
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
+                   COUNT(*) FILTER (WHERE free_margin >= 0 AND free_margin <= 500) as zero_to_500,
+                   COUNT(*) FILTER (WHERE free_margin > 500 AND free_margin <= 1000) as five_hundred_to_1000,
+                   COUNT(*) FILTER (WHERE free_margin > 1000) as above_1000
+            FROM accounts;
+        """)
+        margin_health = cur.fetchone()
+        margin_health_data = {
+            "below_zero": margin_health[0], "zero_to_500": margin_health[1],
+            "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
+        }
+        # Top Performing Accounts
+        cur.execute("""
+            SELECT account_number, realized_pl_daily FROM accounts ORDER BY realized_pl_daily DESC LIMIT 5;
+        """)
+        top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
+        cur.execute("""
+            SELECT account_number, realized_pl_monthly FROM accounts ORDER BY realized_pl_monthly DESC LIMIT 5;
+        """)
+        top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
+        cur.execute("""
+            SELECT account_number, realized_pl_yearly FROM accounts ORDER BY realized_pl_yearly DESC LIMIT 5;
+        """)
+        top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
+        # Drawdown per Broker
+        cur.execute("""
+            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
+            FROM accounts GROUP BY broker;
+        """)
+        drawdown_data = [{"broker": row[0], "drawdown": (row[1] > 0) ? ((row[1] - row[2]) / row[1] * 100) : 0} for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return jsonify({
+            "balance_per_broker": balance_data,
+            "yearly_profits": yearly_pl_data,
+            "margin_health": margin_health_data,
+            "top_daily": top_daily,
+            "top_monthly": top_monthly,
+            "top_yearly": top_yearly,
+            "drawdown": drawdown_data
+        })
+    except Exception as e:
+        logger.error(f"Analytics Fetch Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     try:
@@ -283,7 +350,7 @@ def get_settings():
         cur.execute("""
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                   mask_timer, font_size, notes, broker_offsets
+                   mask_timer, font_size, notes, broker_offsets, alert_thresholds
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -309,8 +376,8 @@ def save_settings():
             INSERT INTO settings (
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                mask_timer, font_size, notes, broker_offsets
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                mask_timer, font_size, notes, broker_offsets, alert_thresholds
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -323,7 +390,8 @@ def save_settings():
                 mask_timer = EXCLUDED.mask_timer,
                 font_size = EXCLUDED.font_size,
                 notes = EXCLUDED.notes,
-                broker_offsets = EXCLUDED.broker_offsets;
+                broker_offsets = EXCLUDED.broker_offsets,
+                alert_thresholds = EXCLUDED.alert_thresholds;
         """, (
             json.dumps(settings.get('sortState', {})),
             settings.get('isNumbersMasked', False),
@@ -336,7 +404,8 @@ def save_settings():
             settings.get('maskTimer', '300'),
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
-            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}))
+            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6})),
+            json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20}))
         ))
         conn.commit()
         cur.close()
@@ -452,4 +521,4 @@ def not_found(error):
 create_tables()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    socketio.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
