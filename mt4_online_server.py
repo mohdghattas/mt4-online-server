@@ -229,10 +229,8 @@ def receive_mt4_data():
         cur.close()
         conn.close()
         logger.info(f"✅ Data stored for account {json_data['account_number']}")
-        # Push update via WebSocket
-        socketio.emit('account_update', json_data)
-        # Check alerts
-        check_alerts(json_data)
+        socketio.emit('account_update', json_data)  # Push update via WebSocket
+        check_alerts(json_data)  # Check for alerts
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
@@ -254,7 +252,7 @@ def check_alerts(account_data):
     if account_data['margin_percent'] < thresholds['margin_percent']:
         alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
     if alerts:
-        socketio.emit('alert', alerts)
+        socketio.emit('alert', alerts)  # Push alerts via WebSocket
     cur.close()
     conn.close()
 
