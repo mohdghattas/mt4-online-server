@@ -324,7 +324,7 @@ def get_analytics():
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts GROUP BY broker;
         """)
-        drawdown_data = [{"broker": row[0], "drawdown": (row[1] > 0) ? ((row[1] - row[2]) / row[1] * 100) : 0} for row in cur.fetchall()]
+        drawdown_data = [{"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} for row in cur.fetchall()]
         cur.close()
         conn.close()
         return jsonify({
