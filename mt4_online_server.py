@@ -31,8 +31,10 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
+        # Drop and recreate accounts table to ensure all columns are present
+        cur.execute("DROP TABLE IF EXISTS accounts;")
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
+            CREATE TABLE accounts (
                 broker TEXT NOT NULL,
                 account_number BIGINT PRIMARY KEY,
                 balance DOUBLE PRECISION DEFAULT 0,
@@ -124,7 +126,7 @@ def create_tables():
             );
         """)
         conn.commit()
-        logger.info("Tables created or already exist: accounts, settings, history")
+        logger.info("Tables created: accounts, settings, history")
     except Exception as e:
         logger.error(f"Table creation failed: {e}")
     finally:
