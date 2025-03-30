@@ -298,7 +298,7 @@ def get_quickstats():
         total_equity = stats[1] or 0
         total_pl = stats[2] or 0
         all_time_pl = stats[3] or 0
-        net_profit = (total_balance - all_time_pl) != 0 ? (all_time_pl / (total_balance - all_time_pl)) * 100 : 0
+        net_profit = (all_time_pl / (total_balance - all_time_pl)) * 100 if (total_balance - all_time_pl) != 0 else 0
         cur.close()
         conn.close()
         return jsonify({
@@ -387,7 +387,7 @@ def get_analytics():
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
                    SUM(deposits_weekly) as weekly_deposits, SUM(withdrawals_weekly) as weekly_withdrawals,
-                   SUM(deposits_monthly) as monthly_deposits, SUM(withdrawals_monthly) as monthly_withdrawals,
+                   SUM(deposits_monthly) as daily_deposits, SUM(withdrawals_monthly) as monthly_withdrawals,
                    SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals
             FROM accounts GROUP BY broker;
         """)
