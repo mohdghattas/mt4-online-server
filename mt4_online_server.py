@@ -95,6 +95,7 @@ def create_tables():
                 notes JSON,
                 broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
                 alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
+                alerts_enabled BOOLEAN DEFAULT TRUE,
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
         """)
@@ -138,58 +139,7 @@ def create_tables():
     finally:
         cur.close()
         conn.close()
-# In create_tables()
-cur.execute("""
-    CREATE TABLE settings (
-        user_id TEXT PRIMARY KEY,
-        sort_state JSON,
-        is_numbers_masked BOOLEAN DEFAULT FALSE,
-        gmt_offset INTEGER DEFAULT 3,
-        period_resets JSON,
-        main_refresh_rate INTEGER DEFAULT 5,
-        critical_margin INTEGER DEFAULT 0,
-        warning_margin INTEGER DEFAULT 500,
-        is_dark_mode BOOLEAN DEFAULT TRUE,
-        mask_timer TEXT DEFAULT 'never',
-        font_size TEXT DEFAULT '14',
-        notes JSON,
-        broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
-        alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
-        alerts_enabled BOOLEAN DEFAULT TRUE,  # New field
-        default_settings_timestamp TIMESTAMP WITH TIME ZONE
-    );
-""")
 
-# In check_alerts()
-def check_alerts(account_data):
-    conn = get_db_connection()
-    if not conn:
-        return
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT alert_thresholds, alerts_enabled FROM settings WHERE user_id = 'default';")
-        result = cur.fetchone()
-        thresholds = json.loads(result[0]) if result else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
-        alerts_enabled = result[1] if result else True  # Default to True if not set
-        alerts = []
-        if alerts_enabled and account_data['open_trades'] > 0:  # Check alerts_enabled
-            if account_data['equity'] < thresholds['equity']:
-                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
-            if account_data['profit_loss'] < thresholds['profit_loss']:
-                alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
-            if account_data['margin_percent'] < thresholds['margin_percent']:
-                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
-            if account_data['open_trades'] > thresholds['open_trades']:
-                alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
-            if not account_data['autotrading']:
-                alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
-        if alerts:
-            socketio.emit('alert', alerts)
-    except Exception as e:
-        logger.error(f"Alert Check Error: {str(e)}")
-    finally:
-        cur.close()
-        conn.close()
 def clean_json_string(raw_data):
     decoded = raw_data.decode("utf-8", errors="replace")
     cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
@@ -295,12 +245,12 @@ def check_alerts(account_data):
         return
     cur = conn.cursor()
     try:
-        cur.execute("SELECT alert_thresholds FROM settings WHERE user_id = 'default';")
-        thresholds = cur.fetchone()
-        thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        cur.execute("SELECT alert_thresholds, alerts_enabled FROM settings WHERE user_id = 'default';")
+        result = cur.fetchone()
+        thresholds = json.loads(result[0]) if result else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        alerts_enabled = result[1] if result else True
         alerts = []
-        # Only check alerts if there are active trades
-        if account_data['open_trades'] > 0:
+        if alerts_enabled and account_data['open_trades'] > 0:
             if account_data['equity'] < thresholds['equity']:
                 alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
             if account_data['profit_loss'] < thresholds['profit_loss']:
@@ -460,7 +410,7 @@ def get_analytics():
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(profit_loss) as daily_pl
             FROM history
-            WHERE snapshot_time >= NOW() - INTERVAL '7 days'
+            WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
             GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
@@ -474,7 +424,7 @@ def get_analytics():
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(open_trades) as daily_trades
             FROM history
-            WHERE snapshot_time >= NOW() - INTERVAL '7 days'
+            WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
             GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
@@ -521,16 +471,16 @@ def get_analytics():
         # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
-                   SUM(deposits_daily) - SUM(CASE WHEN withdrawals_daily < 0 THEN withdrawals_daily ELSE 0 END) as daily_balance,
-                   SUM(deposits_weekly) - SUM(CASE WHEN withdrawals_weekly < 0 THEN withdrawals_weekly ELSE 0 END) as weekly_balance,
-                   SUM(deposits_monthly) - SUM(CASE WHEN withdrawals_monthly < 0 THEN withdrawals_monthly ELSE 0 END) as monthly_balance,
-                   SUM(deposits_yearly) - SUM(CASE WHEN withdrawals_yearly < 0 THEN withdrawals_yearly ELSE 0 END) as yearly_balance,
-                   SUM(deposits_alltime) - SUM(CASE WHEN withdrawals_alltime < 0 THEN withdrawals_alltime ELSE 0 END) as alltime_balance
+                   SUM(deposits_daily) - SUM(withdrawals_daily) as daily_balance,
+                   SUM(deposits_weekly) - SUM(withdrawals_weekly) as weekly_balance,
+                   SUM(deposits_monthly) - SUM(withdrawals_monthly) as monthly_balance,
+                   SUM(deposits_yearly) - SUM(withdrawals_yearly) as yearly_balance,
+                   SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
         dw_balance_data = [
-            {"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], 
-             "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} 
+            {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0, 
+             "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0} 
             for row in cur.fetchall()
         ]
 
@@ -566,7 +516,7 @@ def get_settings():
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                    mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                   default_settings_timestamp
+                   alerts_enabled, default_settings_timestamp
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -584,6 +534,7 @@ def get_settings():
 def save_settings():
     try:
         settings = request.get_json()
+        logger.info(f"Received settings: {settings}")
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -593,8 +544,8 @@ def save_settings():
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                 mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                default_settings_timestamp
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                alerts_enabled, default_settings_timestamp
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -609,6 +560,7 @@ def save_settings():
                 notes = EXCLUDED.notes,
                 broker_offsets = EXCLUDED.broker_offsets,
                 alert_thresholds = EXCLUDED.alert_thresholds,
+                alerts_enabled = EXCLUDED.alerts_enabled,
                 default_settings_timestamp = EXCLUDED.default_settings_timestamp;
         """, (
             json.dumps(settings.get('sortState', {})),
@@ -624,6 +576,7 @@ def save_settings():
             json.dumps(settings.get('notes', {})),
             json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6})),
             json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
+            settings.get('alertsEnabled', True),
             settings.get('defaultSettingsTimestamp')
         ))
         conn.commit()
@@ -632,7 +585,7 @@ def save_settings():
         logger.info("Settings saved successfully")
         return jsonify({"message": "Settings saved"}), 200
     except Exception as e:
-        logger.error(f"Settings Save Error: {str(e)}")
+        logger.error(f"Settings Save Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/history", methods=["POST"])
