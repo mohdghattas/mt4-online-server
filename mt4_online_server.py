@@ -107,7 +107,7 @@ def create_tables():
                 margin_used DOUBLE PRECISION,
                 free_margin DOUBLE PRECISION,
                 margin_level DOUBLE PRECISION,
-                open_trade INTEGER,
+                open_trade INTEGER DEFAULT 0,
                 profit_loss DOUBLE PRECISION,
                 open_charts INTEGER,
                 deposit_withdrawal DOUBLE PRECISION,
@@ -324,17 +324,38 @@ def get_analytics():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
+
         # Balance per Broker
         cur.execute("""
-            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity, SUM(profit_loss) as total_pl, SUM(open_trades) as total_trades
+            SELECT broker, 
+                   SUM(balance) as total_balance, 
+                   SUM(equity) as total_equity, 
+                   SUM(profit_loss) as total_pl, 
+                   SUM(open_trades) as total_trades,
+                   SUM(prev_day_pl) as prev_day_pl,
+                   SUM(realized_pl_daily) as realized_pl_daily,
+                   SUM(realized_pl_weekly) as realized_pl_weekly,
+                   SUM(realized_pl_monthly) as realized_pl_monthly,
+                   SUM(realized_pl_yearly) as realized_pl_yearly,
+                   SUM(realized_pl_alltime) as realized_pl_alltime
             FROM accounts GROUP BY broker;
         """)
-        balance_data = [{"broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], "trades": row[4]} for row in cur.fetchall()]
+        balance_data = [
+            {
+                "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
+                "trades": row[4], "prev_day_pl": row[5], "realized_pl_daily": row[6], 
+                "realized_pl_weekly": row[7], "realized_pl_monthly": row[8], 
+                "realized_pl_yearly": row[9], "realized_pl_alltime": row[10]
+            } for row in cur.fetchall()
+        ]
+
         # Yearly Profits per Broker
         cur.execute("""
-            SELECT broker, SUM(realized_pl_yearly) as yearly_pl FROM accounts GROUP BY broker;
+            SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
+            FROM accounts GROUP BY broker;
         """)
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
+
         # Margin Health
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
@@ -348,43 +369,65 @@ def get_analytics():
             "below_zero": margin_health[0], "zero_to_500": margin_health[1],
             "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
         }
+
         # Top Performing Accounts
         cur.execute("""
-            SELECT account_number, realized_pl_daily FROM accounts ORDER BY realized_pl_daily DESC LIMIT 5;
+            SELECT account_number, realized_pl_daily 
+            FROM accounts 
+            ORDER BY realized_pl_daily DESC LIMIT 5;
         """)
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
-            SELECT account_number, realized_pl_monthly FROM accounts ORDER BY realized_pl_monthly DESC LIMIT 5;
+            SELECT account_number, realized_pl_monthly 
+            FROM accounts 
+            ORDER BY realized_pl_monthly DESC LIMIT 5;
         """)
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
-            SELECT account_number, realized_pl_yearly FROM accounts ORDER BY realized_pl_yearly DESC LIMIT 5;
+            SELECT account_number, realized_pl_yearly 
+            FROM accounts 
+            ORDER BY realized_pl_yearly DESC LIMIT 5;
         """)
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
+
         # Drawdown per Broker
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts GROUP BY broker;
         """)
-        drawdown_data = [{"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} for row in cur.fetchall()]
+        drawdown_data = [
+            {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} 
+            for row in cur.fetchall()
+        ]
+
         # Floating P/L Daily Curve (last 7 days)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, SUM(profit_loss) as daily_pl
+            SELECT DATE(snapshot_time AT TIME ZONE 'UTC') as date, 
+                   SUM(profit_loss) as daily_pl
             FROM history
             WHERE snapshot_time >= NOW() - INTERVAL '7 days'
-            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'UTC')
             ORDER BY date ASC;
         """)
-        floating_pl_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1]} for row in cur.fetchall()]
+        floating_pl_data = [
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} 
+            for row in cur.fetchall()
+        ]
+
         # Daily Live Trades Curve (last 7 days)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, SUM(open_trade) as daily_trades
+            SELECT DATE(snapshot_time AT TIME ZONE 'UTC') as date, 
+                   SUM(open_trades) as daily_trades
             FROM history
             WHERE snapshot_time >= NOW() - INTERVAL '7 days'
-            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'UTC')
             ORDER BY date ASC;
         """)
-        live_trades_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1]} for row in cur.fetchall()]
+        live_trades_data = [
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} 
+            for row in cur.fetchall()
+        ]
+
         # Fees per Broker
         cur.execute("""
             SELECT broker,
@@ -396,7 +439,12 @@ def get_analytics():
                    SUM(CASE WHEN prev_day_holding_fee < 0 THEN prev_day_holding_fee ELSE -prev_day_holding_fee END) as prev_day_holding_fee
             FROM accounts GROUP BY broker;
         """)
-        fees_data = [{"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], "monthly": row[3], "yearly": row[4], "alltime": row[5]} for row in cur.fetchall()]
+        fees_data = [
+            {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], 
+             "monthly": row[3], "yearly": row[4], "alltime": row[5]} 
+            for row in cur.fetchall()
+        ]
+
         # Deposits and Withdrawals per Broker
         cur.execute("""
             SELECT broker,
@@ -407,7 +455,14 @@ def get_analytics():
                    SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
             FROM accounts GROUP BY broker;
         """)
-        deposits_withdrawals_data = [{"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], "alltime_deposits": row[9], "alltime_withdrawals": row[10]} for row in cur.fetchall()]
+        deposits_withdrawals_data = [
+            {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], 
+             "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], 
+             "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], 
+             "alltime_deposits": row[9], "alltime_withdrawals": row[10]} 
+            for row in cur.fetchall()
+        ]
+
         # Deposits and Withdrawals Balance per Broker
         cur.execute("""
             SELECT broker,
@@ -418,9 +473,15 @@ def get_analytics():
                    SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
-        dw_balance_data = [{"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} for row in cur.fetchall()]
+        dw_balance_data = [
+            {"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], 
+             "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} 
+            for row in cur.fetchall()
+        ]
+
         cur.close()
         conn.close()
+
         return jsonify({
             "balance_per_broker": balance_data,
             "yearly_profits": yearly_pl_data,
