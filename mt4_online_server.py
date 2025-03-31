@@ -33,6 +33,8 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
+        # Drop and recreate settings table to ensure schema consistency
+        cur.execute("DROP TABLE IF EXISTS settings;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
@@ -79,7 +81,7 @@ def create_tables():
             CREATE INDEX IF NOT EXISTS idx_accounts_broker ON accounts (broker);
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
+            CREATE TABLE settings (
                 user_id TEXT PRIMARY KEY,
                 sort_state JSON,
                 is_numbers_masked BOOLEAN DEFAULT FALSE,
@@ -241,24 +243,28 @@ def check_alerts(account_data):
     if not conn:
         return
     cur = conn.cursor()
-    cur.execute("SELECT alert_thresholds FROM settings WHERE user_id = 'default';")
-    thresholds = cur.fetchone()
-    thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
-    alerts = []
-    if account_data['equity'] < thresholds['equity']:
-        alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
-    if account_data['profit_loss'] < thresholds['profit_loss']:
-        alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
-    if account_data['margin_percent'] < thresholds['margin_percent']:
-        alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
-    if account_data['open_trades'] > thresholds['open_trades']:
-        alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
-    if not account_data['autotrading']:
-        alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
-    if alerts:
-        socketio.emit('alert', alerts)
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("SELECT alert_thresholds FROM settings WHERE user_id = 'default';")
+        thresholds = cur.fetchone()
+        thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        alerts = []
+        if account_data['equity'] < thresholds['equity']:
+            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
+        if account_data['profit_loss'] < thresholds['profit_loss']:
+            alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
+        if account_data['margin_percent'] < thresholds['margin_percent']:
+            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+        if account_data['open_trades'] > thresholds['open_trades']:
+            alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
+        if not account_data['autotrading']:
+            alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
+        if alerts:
+            socketio.emit('alert', alerts)
+    except Exception as e:
+        logger.error(f"Alert Check Error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
@@ -320,10 +326,10 @@ def get_analytics():
         cur = conn.cursor()
         # Balance per Broker
         cur.execute("""
-            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity, SUM(profit_loss) as total_pl
+            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity, SUM(profit_loss) as total_pl, SUM(open_trades) as total_trades
             FROM accounts GROUP BY broker;
         """)
-        balance_data = [{"broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3]} for row in cur.fetchall()]
+        balance_data = [{"broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], "trades": row[4]} for row in cur.fetchall()]
         # Yearly Profits per Broker
         cur.execute("""
             SELECT broker, SUM(realized_pl_yearly) as yearly_pl FROM accounts GROUP BY broker;
@@ -387,11 +393,23 @@ def get_analytics():
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
                    SUM(deposits_weekly) as weekly_deposits, SUM(withdrawals_weekly) as weekly_withdrawals,
-                   SUM(deposits_monthly) as daily_deposits, SUM(withdrawals_monthly) as monthly_withdrawals,
-                   SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals
+                   SUM(deposits_monthly) as monthly_deposits, SUM(withdrawals_monthly) as monthly_withdrawals,
+                   SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals,
+                   SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
             FROM accounts GROUP BY broker;
         """)
-        deposits_withdrawals_data = [{"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8]} for row in cur.fetchall()]
+        deposits_withdrawals_data = [{"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], "alltime_deposits": row[9], "alltime_withdrawals": row[10]} for row in cur.fetchall()]
+        # Deposits and Withdrawals Balance per Broker
+        cur.execute("""
+            SELECT broker,
+                   SUM(deposits_daily - withdrawals_daily) as daily_balance,
+                   SUM(deposits_weekly - withdrawals_weekly) as weekly_balance,
+                   SUM(deposits_monthly - withdrawals_monthly) as monthly_balance,
+                   SUM(deposits_yearly - withdrawals_yearly) as yearly_balance,
+                   SUM(deposits_alltime - withdrawals_alltime) as alltime_balance
+            FROM accounts GROUP BY broker;
+        """)
+        dw_balance_data = [{"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} for row in cur.fetchall()]
         cur.close()
         conn.close()
         return jsonify({
@@ -404,7 +422,8 @@ def get_analytics():
             "drawdown": drawdown_data,
             "floating_pl": floating_pl_data,
             "fees": fees_data,
-            "deposits_withdrawals": deposits_withdrawals_data
+            "deposits_withdrawals": deposits_withdrawals_data,
+            "dw_balance": dw_balance_data
         })
     except Exception as e:
         logger.error(f"Analytics Fetch Error: {str(e)}")
