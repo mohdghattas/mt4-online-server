@@ -6,3 +6,4 @@ pytz  # ✅ Add this line
 requests
 psycopg2-binary
 flask_socketio
+apscheduler
