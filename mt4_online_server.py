@@ -138,7 +138,58 @@ def create_tables():
     finally:
         cur.close()
         conn.close()
+# In create_tables()
+cur.execute("""
+    CREATE TABLE settings (
+        user_id TEXT PRIMARY KEY,
+        sort_state JSON,
+        is_numbers_masked BOOLEAN DEFAULT FALSE,
+        gmt_offset INTEGER DEFAULT 3,
+        period_resets JSON,
+        main_refresh_rate INTEGER DEFAULT 5,
+        critical_margin INTEGER DEFAULT 0,
+        warning_margin INTEGER DEFAULT 500,
+        is_dark_mode BOOLEAN DEFAULT TRUE,
+        mask_timer TEXT DEFAULT 'never',
+        font_size TEXT DEFAULT '14',
+        notes JSON,
+        broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
+        alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
+        alerts_enabled BOOLEAN DEFAULT TRUE,  # New field
+        default_settings_timestamp TIMESTAMP WITH TIME ZONE
+    );
+""")
 
+# In check_alerts()
+def check_alerts(account_data):
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT alert_thresholds, alerts_enabled FROM settings WHERE user_id = 'default';")
+        result = cur.fetchone()
+        thresholds = json.loads(result[0]) if result else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        alerts_enabled = result[1] if result else True  # Default to True if not set
+        alerts = []
+        if alerts_enabled and account_data['open_trades'] > 0:  # Check alerts_enabled
+            if account_data['equity'] < thresholds['equity']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
+            if account_data['profit_loss'] < thresholds['profit_loss']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
+            if account_data['margin_percent'] < thresholds['margin_percent']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+            if account_data['open_trades'] > thresholds['open_trades']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
+            if not account_data['autotrading']:
+                alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
+        if alerts:
+            socketio.emit('alert', alerts)
+    except Exception as e:
+        logger.error(f"Alert Check Error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
 def clean_json_string(raw_data):
     decoded = raw_data.decode("utf-8", errors="replace")
     cleaned = re.sub(r'[^\x20-\x7E]', '', decoded)
