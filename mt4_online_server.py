@@ -436,7 +436,7 @@ def get_analytics():
             "dw_balance": dw_balance_data
         })
     except Exception as e:
-        logger.error(f"Analytics Fetch Error: {str(e)}")
+        logger.error(f"Analytics Fetch Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/settings", methods=["GET"])
