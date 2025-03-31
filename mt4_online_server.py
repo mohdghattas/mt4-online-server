@@ -248,16 +248,18 @@ def check_alerts(account_data):
         thresholds = cur.fetchone()
         thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
         alerts = []
-        if account_data['equity'] < thresholds['equity']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
-        if account_data['profit_loss'] < thresholds['profit_loss']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
-        if account_data['margin_percent'] < thresholds['margin_percent']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
-        if account_data['open_trades'] > thresholds['open_trades']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
-        if not account_data['autotrading']:
-            alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
+        # Only check alerts if there are active trades
+        if account_data['open_trades'] > 0:
+            if account_data['equity'] < thresholds['equity']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
+            if account_data['profit_loss'] < thresholds['profit_loss']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
+            if account_data['margin_percent'] < thresholds['margin_percent']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+            if account_data['open_trades'] > thresholds['open_trades']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
+            if not account_data['autotrading']:
+                alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
         if alerts:
             socketio.emit('alert', alerts)
     except Exception as e:
@@ -325,7 +327,7 @@ def get_analytics():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
-        # Balance per Broker
+        # Balance per Broker with correct account count
         cur.execute("""
             SELECT broker, 
                    SUM(balance) as total_balance, 
@@ -337,7 +339,8 @@ def get_analytics():
                    SUM(realized_pl_weekly) as realized_pl_weekly,
                    SUM(realized_pl_monthly) as realized_pl_monthly,
                    SUM(realized_pl_yearly) as realized_pl_yearly,
-                   SUM(realized_pl_alltime) as realized_pl_alltime
+                   SUM(realized_pl_alltime) as realized_pl_alltime,
+                   COUNT(DISTINCT account_number) as accounts_count
             FROM accounts GROUP BY broker;
         """)
         balance_data = [
@@ -345,7 +348,8 @@ def get_analytics():
                 "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
                 "trades": row[4], "prev_day_pl": row[5], "realized_pl_daily": row[6], 
                 "realized_pl_weekly": row[7], "realized_pl_monthly": row[8], 
-                "realized_pl_yearly": row[9], "realized_pl_alltime": row[10]
+                "realized_pl_yearly": row[9], "realized_pl_alltime": row[10],
+                "accountsCount": row[11]
             } for row in cur.fetchall()
         ]
 
@@ -400,13 +404,13 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Floating P/L Daily Curve (last 7 days)
+        # Floating P/L Daily Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'UTC') as date, 
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(profit_loss) as daily_pl
             FROM history
             WHERE snapshot_time >= NOW() - INTERVAL '7 days'
-            GROUP BY DATE(snapshot_time AT TIME ZONE 'UTC')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
         floating_pl_data = [
@@ -414,13 +418,13 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Daily Live Trades Curve (last 7 days)
+        # Daily Live Trades Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'UTC') as date, 
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(open_trades) as daily_trades
             FROM history
             WHERE snapshot_time >= NOW() - INTERVAL '7 days'
-            GROUP BY DATE(snapshot_time AT TIME ZONE 'UTC')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
         live_trades_data = [
@@ -463,14 +467,14 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Deposits and Withdrawals Balance per Broker
+        # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
-                   SUM(deposits_daily) - SUM(withdrawals_daily) as daily_balance,
-                   SUM(deposits_weekly) - SUM(withdrawals_weekly) as weekly_balance,
-                   SUM(deposits_monthly) - SUM(withdrawals_monthly) as monthly_balance,
-                   SUM(deposits_yearly) - SUM(withdrawals_yearly) as yearly_balance,
-                   SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
+                   SUM(deposits_daily) - SUM(CASE WHEN withdrawals_daily < 0 THEN withdrawals_daily ELSE 0 END) as daily_balance,
+                   SUM(deposits_weekly) - SUM(CASE WHEN withdrawals_weekly < 0 THEN withdrawals_weekly ELSE 0 END) as weekly_balance,
+                   SUM(deposits_monthly) - SUM(CASE WHEN withdrawals_monthly < 0 THEN withdrawals_monthly ELSE 0 END) as monthly_balance,
+                   SUM(deposits_yearly) - SUM(CASE WHEN withdrawals_yearly < 0 THEN withdrawals_yearly ELSE 0 END) as yearly_balance,
+                   SUM(deposits_alltime) - SUM(CASE WHEN withdrawals_alltime < 0 THEN withdrawals_alltime ELSE 0 END) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
         dw_balance_data = [
