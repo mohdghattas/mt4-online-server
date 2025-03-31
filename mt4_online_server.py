@@ -33,7 +33,6 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        # Drop and recreate settings table to ensure schema consistency
         cur.execute("DROP TABLE IF EXISTS settings;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
@@ -90,12 +89,13 @@ def create_tables():
                 main_refresh_rate INTEGER DEFAULT 5,
                 critical_margin INTEGER DEFAULT 0,
                 warning_margin INTEGER DEFAULT 500,
-                is_dark_mode BOOLEAN DEFAULT FALSE,
-                mask_timer TEXT DEFAULT '300',
+                is_dark_mode BOOLEAN DEFAULT TRUE,
+                mask_timer TEXT DEFAULT 'never',
                 font_size TEXT DEFAULT '14',
                 notes JSON,
                 broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
-                alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}'
+                alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
+                default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
         """)
         cur.execute("""
@@ -376,6 +376,15 @@ def get_analytics():
             ORDER BY date ASC;
         """)
         floating_pl_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1]} for row in cur.fetchall()]
+        # Daily Live Trades Curve (last 7 days)
+        cur.execute("""
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, SUM(open_trade) as daily_trades
+            FROM history
+            WHERE snapshot_time >= NOW() - INTERVAL '7 days'
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
+            ORDER BY date ASC;
+        """)
+        live_trades_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1]} for row in cur.fetchall()]
         # Fees per Broker
         cur.execute("""
             SELECT broker,
@@ -402,11 +411,11 @@ def get_analytics():
         # Deposits and Withdrawals Balance per Broker
         cur.execute("""
             SELECT broker,
-                   SUM(deposits_daily - withdrawals_daily) as daily_balance,
-                   SUM(deposits_weekly - withdrawals_weekly) as weekly_balance,
-                   SUM(deposits_monthly - withdrawals_monthly) as monthly_balance,
-                   SUM(deposits_yearly - withdrawals_yearly) as yearly_balance,
-                   SUM(deposits_alltime - withdrawals_alltime) as alltime_balance
+                   SUM(deposits_daily) - SUM(withdrawals_daily) as daily_balance,
+                   SUM(deposits_weekly) - SUM(withdrawals_weekly) as weekly_balance,
+                   SUM(deposits_monthly) - SUM(withdrawals_monthly) as monthly_balance,
+                   SUM(deposits_yearly) - SUM(withdrawals_yearly) as yearly_balance,
+                   SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
         dw_balance_data = [{"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} for row in cur.fetchall()]
@@ -421,6 +430,7 @@ def get_analytics():
             "top_yearly": top_yearly,
             "drawdown": drawdown_data,
             "floating_pl": floating_pl_data,
+            "live_trades": live_trades_data,
             "fees": fees_data,
             "deposits_withdrawals": deposits_withdrawals_data,
             "dw_balance": dw_balance_data
@@ -439,7 +449,8 @@ def get_settings():
         cur.execute("""
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                   mask_timer, font_size, notes, broker_offsets, alert_thresholds
+                   mask_timer, font_size, notes, broker_offsets, alert_thresholds,
+                   default_settings_timestamp
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -465,8 +476,9 @@ def save_settings():
             INSERT INTO settings (
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
-                mask_timer, font_size, notes, broker_offsets, alert_thresholds
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                mask_timer, font_size, notes, broker_offsets, alert_thresholds,
+                default_settings_timestamp
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -480,7 +492,8 @@ def save_settings():
                 font_size = EXCLUDED.font_size,
                 notes = EXCLUDED.notes,
                 broker_offsets = EXCLUDED.broker_offsets,
-                alert_thresholds = EXCLUDED.alert_thresholds;
+                alert_thresholds = EXCLUDED.alert_thresholds,
+                default_settings_timestamp = EXCLUDED.default_settings_timestamp;
         """, (
             json.dumps(settings.get('sortState', {})),
             settings.get('isNumbersMasked', False),
@@ -489,12 +502,13 @@ def save_settings():
             settings.get('mainRefreshRate', 5),
             settings.get('criticalMargin', 0),
             settings.get('warningMargin', 500),
-            settings.get('isDarkMode', False),
-            settings.get('maskTimer', '300'),
+            settings.get('isDarkMode', True),
+            settings.get('maskTimer', 'never'),
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
             json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6})),
-            json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}))
+            json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
+            settings.get('defaultSettingsTimestamp')
         ))
         conn.commit()
         cur.close()
