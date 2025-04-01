@@ -8,6 +8,7 @@ import json
 import re
 from datetime import datetime
 import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 CORS(app)
@@ -131,6 +132,8 @@ def create_tables():
                 last_update TIMESTAMP WITH TIME ZONE
             );
             CREATE INDEX IF NOT EXISTS idx_history_snapshot_time ON history (snapshot_time);
+            CREATE INDEX IF NOT EXISTS idx_history_account_number ON history (account_number);
+            CREATE INDEX IF NOT EXISTS idx_history_broker ON history (broker);
         """)
         conn.commit()
         logger.info("Tables created with indexes")
@@ -471,11 +474,11 @@ def get_analytics():
         # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
-                   SUM(deposits_daily) - SUM(withdrawals_daily) as daily_balance,
-                   SUM(deposits_weekly) - SUM(withdrawals_weekly) as weekly_balance,
-                   SUM(deposits_monthly) - SUM(withdrawals_monthly) as monthly_balance,
-                   SUM(deposits_yearly) - SUM(withdrawals_yearly) as yearly_balance,
-                   SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
+                   SUM(deposits_daily) + SUM(withdrawals_daily) as daily_balance,
+                   SUM(deposits_weekly) + SUM(withdrawals_weekly) as weekly_balance,
+                   SUM(deposits_monthly) + SUM(withdrawals_monthly) as monthly_balance,
+                   SUM(deposits_yearly) + SUM(withdrawals_yearly) as yearly_balance,
+                   SUM(deposits_alltime) + SUM(withdrawals_alltime) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
         dw_balance_data = [
@@ -601,7 +604,7 @@ def save_history():
         for entry in data:
             local_tz = pytz.timezone('Asia/Beirut')
             snapshot_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
-            utc_time = snapshot_time.astimezone(pytz.UTC)
+            beirut_time = snapshot_time.astimezone(local_tz)
             cur.execute("""
                 INSERT INTO history (
                     account_number, balance, equity, margin_used, free_margin, margin_level,
@@ -639,8 +642,8 @@ def save_history():
                 None,
                 None,
                 None,
-                utc_time,
-                utc_time
+                beirut_time,
+                beirut_time
             ))
         conn.commit()
         cur.close()
@@ -689,6 +692,27 @@ def get_history():
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
+
+scheduler = BackgroundScheduler()
+
+def emit_account_updates():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM accounts;")
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        accounts = [dict(zip(columns, row)) for row in rows]
+        socketio.emit('account_update', {"accounts": accounts})
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Periodic Update Error: {e}")
+
+scheduler.add_job(emit_account_updates, 'interval', seconds=5)
+scheduler.start()
 
 create_tables()
 
