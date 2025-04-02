@@ -6,8 +6,9 @@ import logging
 import os
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 CORS(app)
@@ -33,6 +34,7 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
+        cur.execute("DROP TABLE IF EXISTS settings;")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
@@ -73,14 +75,13 @@ def create_tables():
                 withdrawals_monthly DOUBLE PRECISION DEFAULT 0,
                 withdrawals_yearly DOUBLE PRECISION DEFAULT 0,
                 prev_day_pl DOUBLE PRECISION DEFAULT 0,
-                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0,
-                last_update TIMESTAMP WITH TIME ZONE
+                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_accounts_account_number ON accounts (account_number);
             CREATE INDEX IF NOT EXISTS idx_accounts_broker ON accounts (broker);
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
+            CREATE TABLE settings (
                 user_id TEXT PRIMARY KEY,
                 sort_state JSON,
                 is_numbers_masked BOOLEAN DEFAULT FALSE,
@@ -95,22 +96,24 @@ def create_tables():
                 notes JSON,
                 broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
                 alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
+                alerts_enabled BOOLEAN DEFAULT TRUE,
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id SERIAL PRIMARY KEY,
-                account_number BIGINT NOT NULL,
-                date DATE NOT NULL,
+                account_number BIGINT,
                 balance DOUBLE PRECISION,
                 equity DOUBLE PRECISION,
                 margin_used DOUBLE PRECISION,
                 free_margin DOUBLE PRECISION,
-                margin_percent DOUBLE PRECISION,
-                open_trades INTEGER,
+                margin_level DOUBLE PRECISION,
+                open_trade INTEGER DEFAULT 0,
                 profit_loss DOUBLE PRECISION,
                 open_charts INTEGER,
+                deposit_withdrawal DOUBLE PRECISION,
+                margin_percent DOUBLE PRECISION,
                 realized_pl_daily DOUBLE PRECISION,
                 realized_pl_weekly DOUBLE PRECISION,
                 realized_pl_monthly DOUBLE PRECISION,
@@ -122,14 +125,18 @@ def create_tables():
                 realized_pl_alltime DOUBLE PRECISION,
                 holding_fee_daily DOUBLE PRECISION,
                 broker TEXT,
-                last_update TIMESTAMP WITH TIME ZONE,
-                CONSTRAINT unique_account_date UNIQUE (account_number, date)
+                traded_pairs TEXT,
+                open_pairs_charts TEXT,
+                ea_names TEXT,
+                snapshot_time TIMESTAMP WITH TIME ZONE,
+                last_update TIMESTAMP WITH TIME ZONE
             );
-            CREATE INDEX IF NOT EXISTS idx_history_date ON history (date);
+            CREATE INDEX IF NOT EXISTS idx_history_snapshot_time ON history (snapshot_time);
             CREATE INDEX IF NOT EXISTS idx_history_account_number ON history (account_number);
+            CREATE INDEX IF NOT EXISTS idx_history_broker ON history (broker);
         """)
         conn.commit()
-        logger.info("Tables created with indexes and unique constraint")
+        logger.info("Tables created with indexes")
     except Exception as e:
         logger.error(f"Table creation failed: {e}")
     finally:
@@ -166,13 +173,10 @@ def receive_mt4_data():
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
         json_data["autotrading"] = json_data["autotrading"] == "true" or json_data["autotrading"] == True
-
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-
-        current_time = datetime.now(pytz.UTC)
         cur.execute("""
             INSERT INTO accounts (
                 broker, account_number, balance, equity, margin_used, free_margin,
@@ -185,10 +189,10 @@ def receive_mt4_data():
                 swap_alltime, deposits_daily, deposits_weekly, deposits_monthly,
                 deposits_yearly, withdrawals_daily, withdrawals_weekly,
                 withdrawals_monthly, withdrawals_yearly, prev_day_pl,
-                prev_day_holding_fee, last_update
+                prev_day_holding_fee
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 broker = EXCLUDED.broker, balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity, margin_used = EXCLUDED.margin_used,
@@ -225,82 +229,11 @@ def receive_mt4_data():
                 withdrawals_monthly = EXCLUDED.withdrawals_monthly,
                 withdrawals_yearly = EXCLUDED.withdrawals_yearly,
                 prev_day_pl = EXCLUDED.prev_day_pl,
-                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee,
-                last_update = EXCLUDED.last_update;
-        """, tuple(json_data[field] for field in required_fields) + (current_time,))
-
-        beirut_tz = pytz.timezone('Asia/Beirut')
-        current_beirut_time = current_time.astimezone(beirut_tz)
-        current_date = current_beirut_time.date()
-        midnight_beirut = beirut_tz.localize(datetime.combine(current_date, datetime.min.time()))
-        next_midnight_beirut = midnight_beirut + timedelta(days=1)
-        next_midnight_utc = next_midnight_beirut.astimezone(pytz.UTC)
-
-        cur.execute("""
-            SELECT last_update FROM accounts WHERE account_number = %s;
-        """, (json_data["account_number"],))
-        last_update = cur.fetchone()[0]
-        if last_update is None or last_update < midnight_beirut.astimezone(pytz.UTC):
-            cur.execute("""
-                INSERT INTO history (
-                    account_number, date, balance, equity, margin_used, free_margin,
-                    margin_percent, open_trades, profit_loss, open_charts,
-                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly,
-                    realized_pl_yearly, autotrading, empty_charts, deposits_alltime,
-                    withdrawals_alltime, realized_pl_alltime, holding_fee_daily,
-                    broker, last_update
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (account_number, date) DO UPDATE SET
-                    balance = EXCLUDED.balance,
-                    equity = EXCLUDED.equity,
-                    margin_used = EXCLUDED.margin_used,
-                    free_margin = EXCLUDED.free_margin,
-                    margin_percent = EXCLUDED.margin_percent,
-                    open_trades = EXCLUDED.open_trades,
-                    profit_loss = EXCLUDED.profit_loss,
-                    open_charts = EXCLUDED.open_charts,
-                    realized_pl_daily = EXCLUDED.realized_pl_daily,
-                    realized_pl_weekly = EXCLUDED.realized_pl_weekly,
-                    realized_pl_monthly = EXCLUDED.realized_pl_monthly,
-                    realized_pl_yearly = EXCLUDED.realized_pl_yearly,
-                    autotrading = EXCLUDED.autotrading,
-                    empty_charts = EXCLUDED.empty_charts,
-                    deposits_alltime = EXCLUDED.deposits_alltime,
-                    withdrawals_alltime = EXCLUDED.withdrawals_alltime,
-                    realized_pl_alltime = EXCLUDED.realized_pl_alltime,
-                    holding_fee_daily = EXCLUDED.holding_fee_daily,
-                    broker = EXCLUDED.broker,
-                    last_update = EXCLUDED.last_update;
-            """, (
-                json_data["account_number"],
-                current_date,
-                json_data["balance"],
-                json_data["equity"],
-                json_data["margin_used"],
-                json_data["free_margin"],
-                json_data["margin_percent"],
-                json_data["open_trades"],
-                json_data["profit_loss"],
-                json_data["open_charts"],
-                json_data["realized_pl_daily"],
-                json_data["realized_pl_weekly"],
-                json_data["realized_pl_monthly"],
-                json_data["realized_pl_yearly"],
-                json_data["autotrading"],
-                json_data["empty_charts"],
-                json_data["deposits_alltime"],
-                json_data["withdrawals_alltime"],
-                json_data["realized_pl_alltime"],
-                json_data["holding_fee_daily"],
-                json_data["broker"],
-                current_time
-            ))
-
+                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
+        """, tuple(json_data[field] for field in required_fields))
         conn.commit()
         cur.close()
         conn.close()
-
         logger.info(f"✅ Data stored for account {json_data['account_number']}")
         socketio.emit('account_update', json_data)
         check_alerts(json_data)
@@ -315,20 +248,22 @@ def check_alerts(account_data):
         return
     cur = conn.cursor()
     try:
-        cur.execute("SELECT alert_thresholds FROM settings WHERE user_id = 'default';")
-        thresholds = cur.fetchone()
-        thresholds = json.loads(thresholds[0]) if thresholds else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        cur.execute("SELECT alert_thresholds, alerts_enabled FROM settings WHERE user_id = 'default';")
+        result = cur.fetchone()
+        thresholds = json.loads(result[0]) if result else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        alerts_enabled = result[1] if result else True
         alerts = []
-        if account_data['equity'] < thresholds['equity']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
-        if account_data['profit_loss'] < thresholds['profit_loss']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
-        if account_data['margin_percent'] < thresholds['margin_percent']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
-        if account_data['open_trades'] > thresholds['open_trades']:
-            alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
-        if not account_data['autotrading']:
-            alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
+        if alerts_enabled and account_data['open_trades'] > 0:
+            if account_data['equity'] < thresholds['equity']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Equity: {account_data['equity']}", "severity": "critical"})
+            if account_data['profit_loss'] < thresholds['profit_loss']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
+            if account_data['margin_percent'] < thresholds['margin_percent']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+            if account_data['open_trades'] > thresholds['open_trades']:
+                alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
+            if not account_data['autotrading']:
+                alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
         if alerts:
             socketio.emit('alert', alerts)
     except Exception as e:
@@ -361,38 +296,20 @@ def get_quickstats():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        # Fetch alert thresholds from settings
-        cur.execute("SELECT alert_thresholds, critical_margin FROM settings WHERE user_id = 'default';")
-        settings_row = cur.fetchone()
-        thresholds = json.loads(settings_row[0]) if settings_row and settings_row[0] else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
-        critical_margin = settings_row[1] if settings_row and settings_row[1] is not None else 0
-        
         cur.execute("""
             SELECT SUM(balance) as total_balance,
                    SUM(equity) as total_equity,
                    SUM(profit_loss) as total_pl,
                    SUM(CASE WHEN broker = 'Raw Trading Ltd'
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
-                            ELSE realized_pl_alltime END) as all_time_pl,
-                   COUNT(CASE WHEN autotrading THEN 1 END) as total_active_eas,
-                   (SELECT COUNT(*) FROM history 
-                    WHERE date = CURRENT_DATE 
-                    AND (free_margin < %s OR equity < %s OR profit_loss < %s OR margin_percent < %s OR open_trades > %s)) as alert_count
+                            ELSE realized_pl_alltime END) as all_time_pl
             FROM accounts;
-        """, (
-            critical_margin,
-            thresholds['equity'],
-            thresholds['profit_loss'],
-            thresholds['margin_percent'],
-            thresholds['open_trades']
-        ))
+        """)
         stats = cur.fetchone()
         total_balance = stats[0] or 0
         total_equity = stats[1] or 0
         total_pl = stats[2] or 0
         all_time_pl = stats[3] or 0
-        total_active_eas = stats[4] or 0
-        alert_count = stats[5] or 0
         net_profit = (all_time_pl / (total_balance - all_time_pl)) * 100 if (total_balance - all_time_pl) != 0 else 0
         cur.close()
         conn.close()
@@ -400,9 +317,7 @@ def get_quickstats():
             "total_balance": total_balance,
             "total_equity": total_equity,
             "total_pl": total_pl,
-            "net_profit": net_profit,
-            "total_active_eas": total_active_eas,
-            "alert_count": alert_count
+            "net_profit": net_profit
         })
     except Exception as e:
         logger.error(f"Quick Stats Fetch Error: {str(e)}")
@@ -415,15 +330,41 @@ def get_analytics():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
+
+        # Balance per Broker with correct account count
         cur.execute("""
-            SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity, SUM(profit_loss) as total_pl, SUM(open_trades) as total_trades
+            SELECT broker, 
+                   SUM(balance) as total_balance, 
+                   SUM(equity) as total_equity, 
+                   SUM(profit_loss) as total_pl, 
+                   SUM(open_trades) as total_trades,
+                   SUM(prev_day_pl) as prev_day_pl,
+                   SUM(realized_pl_daily) as realized_pl_daily,
+                   SUM(realized_pl_weekly) as realized_pl_weekly,
+                   SUM(realized_pl_monthly) as realized_pl_monthly,
+                   SUM(realized_pl_yearly) as realized_pl_yearly,
+                   SUM(realized_pl_alltime) as realized_pl_alltime,
+                   COUNT(DISTINCT account_number) as accounts_count
             FROM accounts GROUP BY broker;
         """)
-        balance_data = [{"broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], "trades": row[4]} for row in cur.fetchall()]
+        balance_data = [
+            {
+                "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
+                "trades": row[4], "prev_day_pl": row[5], "realized_pl_daily": row[6], 
+                "realized_pl_weekly": row[7], "realized_pl_monthly": row[8], 
+                "realized_pl_yearly": row[9], "realized_pl_alltime": row[10],
+                "accountsCount": row[11]
+            } for row in cur.fetchall()
+        ]
+
+        # Yearly Profits per Broker
         cur.execute("""
-            SELECT broker, SUM(realized_pl_yearly) as yearly_pl FROM accounts GROUP BY broker;
+            SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
+            FROM accounts GROUP BY broker;
         """)
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
+
+        # Margin Health
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
                    COUNT(*) FILTER (WHERE free_margin >= 0 AND free_margin <= 500) as zero_to_500,
@@ -436,44 +377,66 @@ def get_analytics():
             "below_zero": margin_health[0], "zero_to_500": margin_health[1],
             "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
         }
+
+        # Top Performing Accounts
         cur.execute("""
-            SELECT account_number, realized_pl_daily FROM accounts ORDER BY realized_pl_daily DESC LIMIT 5;
+            SELECT account_number, realized_pl_daily 
+            FROM accounts 
+            ORDER BY realized_pl_daily DESC LIMIT 5;
         """)
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
-            SELECT account_number, realized_pl_monthly FROM accounts ORDER BY realized_pl_monthly DESC LIMIT 5;
+            SELECT account_number, realized_pl_monthly 
+            FROM accounts 
+            ORDER BY realized_pl_monthly DESC LIMIT 5;
         """)
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
-            SELECT account_number, realized_pl_yearly FROM accounts ORDER BY realized_pl_yearly DESC LIMIT 5;
+            SELECT account_number, realized_pl_yearly 
+            FROM accounts 
+            ORDER BY realized_pl_yearly DESC LIMIT 5;
         """)
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
+
+        # Drawdown per Broker
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts GROUP BY broker;
         """)
-        drawdown_data = [{"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} for row in cur.fetchall()]
-        
+        drawdown_data = [
+            {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} 
+            for row in cur.fetchall()
+        ]
+
+        # Floating P/L Daily Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT date, SUM(profit_loss) as daily_pl
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
+                   SUM(profit_loss) as daily_pl
             FROM history
-            WHERE date >= CURRENT_DATE - INTERVAL '7 days'
-            GROUP BY date
+            WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
-        floating_pl_rows = cur.fetchall()
-        floating_pl_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} for row in floating_pl_rows] if floating_pl_rows else [{"date": "N/A", "daily_pl": 0}]
-        
+        floating_pl_data = [
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} 
+            for row in cur.fetchall()
+        ]
+
+        # Daily Live Trades Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT date, SUM(open_trades) as daily_trades
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
+                   SUM(open_trades) as daily_trades
             FROM history
-            WHERE date >= CURRENT_DATE - INTERVAL '7 days'
-            GROUP BY date
+            WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
+            GROUP BY DATE(snapshot_time AT TIME ZONE 'Asia/Beirut')
             ORDER BY date ASC;
         """)
-        live_trades_rows = cur.fetchall()
-        live_trades_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} for row in live_trades_rows] if live_trades_rows else [{"date": "N/A", "daily_trades": 0}]
-        
+        live_trades_data = [
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} 
+            for row in cur.fetchall()
+        ]
+
+        # Fees per Broker
         cur.execute("""
             SELECT broker,
                    SUM(CASE WHEN holding_fee_daily < 0 THEN holding_fee_daily ELSE -holding_fee_daily END + swap_daily) as daily_fees,
@@ -484,7 +447,13 @@ def get_analytics():
                    SUM(CASE WHEN prev_day_holding_fee < 0 THEN prev_day_holding_fee ELSE -prev_day_holding_fee END) as prev_day_holding_fee
             FROM accounts GROUP BY broker;
         """)
-        fees_data = [{"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], "monthly": row[3], "yearly": row[4], "alltime": row[5]} for row in cur.fetchall()]
+        fees_data = [
+            {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], 
+             "monthly": row[3], "yearly": row[4], "alltime": row[5]} 
+            for row in cur.fetchall()
+        ]
+
+        # Deposits and Withdrawals per Broker
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
@@ -494,19 +463,33 @@ def get_analytics():
                    SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
             FROM accounts GROUP BY broker;
         """)
-        deposits_withdrawals_data = [{"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], "alltime_deposits": row[9], "alltime_withdrawals": row[10]} for row in cur.fetchall()]
+        deposits_withdrawals_data = [
+            {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], 
+             "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], 
+             "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], 
+             "alltime_deposits": row[9], "alltime_withdrawals": row[10]} 
+            for row in cur.fetchall()
+        ]
+
+        # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
-                   SUM(deposits_daily) - SUM(withdrawals_daily) as daily_balance,
-                   SUM(deposits_weekly) - SUM(withdrawals_weekly) as weekly_balance,
-                   SUM(deposits_monthly) - SUM(withdrawals_monthly) as monthly_balance,
-                   SUM(deposits_yearly) - SUM(withdrawals_yearly) as yearly_balance,
-                   SUM(deposits_alltime) - SUM(withdrawals_alltime) as alltime_balance
+                   SUM(deposits_daily) + SUM(withdrawals_daily) as daily_balance,
+                   SUM(deposits_weekly) + SUM(withdrawals_weekly) as weekly_balance,
+                   SUM(deposits_monthly) + SUM(withdrawals_monthly) as monthly_balance,
+                   SUM(deposits_yearly) + SUM(withdrawals_yearly) as yearly_balance,
+                   SUM(deposits_alltime) + SUM(withdrawals_alltime) as alltime_balance
             FROM accounts GROUP BY broker;
         """)
-        dw_balance_data = [{"broker": row[0], "daily_balance": row[1], "weekly_balance": row[2], "monthly_balance": row[3], "yearly_balance": row[4], "alltime_balance": row[5]} for row in cur.fetchall()]
+        dw_balance_data = [
+            {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0, 
+             "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0} 
+            for row in cur.fetchall()
+        ]
+
         cur.close()
         conn.close()
+
         return jsonify({
             "balance_per_broker": balance_data,
             "yearly_profits": yearly_pl_data,
@@ -536,7 +519,7 @@ def get_settings():
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                    mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                   default_settings_timestamp
+                   alerts_enabled, default_settings_timestamp
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -554,6 +537,7 @@ def get_settings():
 def save_settings():
     try:
         settings = request.get_json()
+        logger.info(f"Received settings: {settings}")
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -563,8 +547,8 @@ def save_settings():
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                 mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                default_settings_timestamp
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                alerts_enabled, default_settings_timestamp
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -579,6 +563,7 @@ def save_settings():
                 notes = EXCLUDED.notes,
                 broker_offsets = EXCLUDED.broker_offsets,
                 alert_thresholds = EXCLUDED.alert_thresholds,
+                alerts_enabled = EXCLUDED.alerts_enabled,
                 default_settings_timestamp = EXCLUDED.default_settings_timestamp;
         """, (
             json.dumps(settings.get('sortState', {})),
@@ -594,6 +579,7 @@ def save_settings():
             json.dumps(settings.get('notes', {})),
             json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6})),
             json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
+            settings.get('alertsEnabled', True),
             settings.get('defaultSettingsTimestamp')
         ))
         conn.commit()
@@ -602,7 +588,7 @@ def save_settings():
         logger.info("Settings saved successfully")
         return jsonify({"message": "Settings saved"}), 200
     except Exception as e:
-        logger.error(f"Settings Save Error: {str(e)}")
+        logger.error(f"Settings Save Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/history", methods=["POST"])
@@ -616,50 +602,32 @@ def save_history():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         for entry in data:
+            local_tz = pytz.timezone('Asia/Beirut')
             snapshot_time = datetime.strptime(entry['timestamp'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=pytz.UTC)
-            date = snapshot_time.astimezone(pytz.timezone('Asia/Beirut')).date()
+            beirut_time = snapshot_time.astimezone(local_tz)
             cur.execute("""
                 INSERT INTO history (
-                    account_number, date, balance, equity, margin_used, free_margin,
-                    margin_percent, open_trades, profit_loss, open_charts,
-                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly,
-                    realized_pl_yearly, autotrading, empty_charts, deposits_alltime,
-                    withdrawals_alltime, realized_pl_alltime, holding_fee_daily,
-                    broker, last_update
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (account_number, date) DO UPDATE SET
-                    balance = EXCLUDED.balance,
-                    equity = EXCLUDED.equity,
-                    margin_used = EXCLUDED.margin_used,
-                    free_margin = EXCLUDED.free_margin,
-                    margin_percent = EXCLUDED.margin_percent,
-                    open_trades = EXCLUDED.open_trades,
-                    profit_loss = EXCLUDED.profit_loss,
-                    open_charts = EXCLUDED.open_charts,
-                    realized_pl_daily = EXCLUDED.realized_pl_daily,
-                    realized_pl_weekly = EXCLUDED.realized_pl_weekly,
-                    realized_pl_monthly = EXCLUDED.realized_pl_monthly,
-                    realized_pl_yearly = EXCLUDED.realized_pl_yearly,
-                    autotrading = EXCLUDED.autotrading,
-                    empty_charts = EXCLUDED.empty_charts,
-                    deposits_alltime = EXCLUDED.deposits_alltime,
-                    withdrawals_alltime = EXCLUDED.withdrawals_alltime,
-                    realized_pl_alltime = EXCLUDED.realized_pl_alltime,
-                    holding_fee_daily = EXCLUDED.holding_fee_daily,
-                    broker = EXCLUDED.broker,
-                    last_update = EXCLUDED.last_update;
+                    account_number, balance, equity, margin_used, free_margin, margin_level,
+                    open_trade, profit_loss, open_charts, deposit_withdrawal, margin_percent,
+                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly,
+                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime,
+                    realized_pl_alltime, holding_fee_daily, broker, traded_pairs,
+                    open_pairs_charts, ea_names, snapshot_time, last_update
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
             """, (
                 entry.get('account_number'),
-                date,
                 entry.get('balance'),
                 entry.get('equity'),
                 entry.get('margin_used'),
                 entry.get('free_margin'),
-                entry.get('margin_percent'),
+                entry.get('margin_percent', 0),
                 entry.get('open_trades', 0),
                 entry.get('profit_loss'),
                 entry.get('open_charts'),
+                0,
+                entry.get('margin_percent'),
                 entry.get('realized_pl_daily'),
                 entry.get('realized_pl_weekly'),
                 entry.get('realized_pl_monthly'),
@@ -671,7 +639,11 @@ def save_history():
                 entry.get('realized_pl_alltime'),
                 entry.get('holding_fee_daily'),
                 entry.get('broker'),
-                snapshot_time
+                None,
+                None,
+                None,
+                beirut_time,
+                beirut_time
             ))
         conn.commit()
         cur.close()
@@ -699,10 +671,10 @@ def get_history():
             query += " AND account_number = %s"
             params.append(account)
         if start:
-            query += " AND date >= %s"
+            query += " AND snapshot_time >= %s"
             params.append(start)
         if end:
-            query += " AND date <= %s"
+            query += " AND snapshot_time <= %s"
             params.append(end)
         if broker:
             query += " AND broker = %s"
@@ -720,6 +692,27 @@ def get_history():
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
+
+scheduler = BackgroundScheduler()
+
+def emit_account_updates():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM accounts;")
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        accounts = [dict(zip(columns, row)) for row in rows]
+        socketio.emit('account_update', {"accounts": accounts})
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Periodic Update Error: {e}")
+
+scheduler.add_job(emit_account_updates, 'interval', seconds=5)
+scheduler.start()
 
 create_tables()
 
