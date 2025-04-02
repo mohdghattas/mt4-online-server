@@ -33,7 +33,6 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        # Do not drop settings table to preserve data
         cur.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
@@ -173,7 +172,6 @@ def receive_mt4_data():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
-        # Update accounts table with last_update timestamp
         current_time = datetime.now(pytz.UTC)
         cur.execute("""
             INSERT INTO accounts (
@@ -231,7 +229,6 @@ def receive_mt4_data():
                 last_update = EXCLUDED.last_update;
         """, tuple(json_data[field] for field in required_fields) + (current_time,))
 
-        # Check for daily snapshot (midnight GMT+3)
         beirut_tz = pytz.timezone('Asia/Beirut')
         current_beirut_time = current_time.astimezone(beirut_tz)
         current_date = current_beirut_time.date()
@@ -364,6 +361,12 @@ def get_quickstats():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
+        # Fetch alert thresholds from settings
+        cur.execute("SELECT alert_thresholds, critical_margin FROM settings WHERE user_id = 'default';")
+        settings_row = cur.fetchone()
+        thresholds = json.loads(settings_row[0]) if settings_row and settings_row[0] else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        critical_margin = settings_row[1] if settings_row and settings_row[1] is not None else 0
+        
         cur.execute("""
             SELECT SUM(balance) as total_balance,
                    SUM(equity) as total_equity,
@@ -372,9 +375,17 @@ def get_quickstats():
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
                             ELSE realized_pl_alltime END) as all_time_pl,
                    COUNT(CASE WHEN autotrading THEN 1 END) as total_active_eas,
-                   (SELECT COUNT(*) FROM history WHERE date = CURRENT_DATE AND (free_margin < 0 OR equity < 500 OR profit_loss < -1000 OR margin_percent < 20 OR open_trades > 50)) as alert_count
+                   (SELECT COUNT(*) FROM history 
+                    WHERE date = CURRENT_DATE 
+                    AND (free_margin < %s OR equity < %s OR profit_loss < %s OR margin_percent < %s OR open_trades > %s)) as alert_count
             FROM accounts;
-        """)
+        """, (
+            critical_margin,
+            thresholds['equity'],
+            thresholds['profit_loss'],
+            thresholds['margin_percent'],
+            thresholds['open_trades']
+        ))
         stats = cur.fetchone()
         total_balance = stats[0] or 0
         total_equity = stats[1] or 0
@@ -442,6 +453,7 @@ def get_analytics():
             FROM accounts GROUP BY broker;
         """)
         drawdown_data = [{"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} for row in cur.fetchall()]
+        
         cur.execute("""
             SELECT date, SUM(profit_loss) as daily_pl
             FROM history
@@ -449,7 +461,9 @@ def get_analytics():
             GROUP BY date
             ORDER BY date ASC;
         """)
-        floating_pl_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1]} for row in cur.fetchall()]
+        floating_pl_rows = cur.fetchall()
+        floating_pl_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} for row in floating_pl_rows] if floating_pl_rows else [{"date": "N/A", "daily_pl": 0}]
+        
         cur.execute("""
             SELECT date, SUM(open_trades) as daily_trades
             FROM history
@@ -457,7 +471,9 @@ def get_analytics():
             GROUP BY date
             ORDER BY date ASC;
         """)
-        live_trades_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1]} for row in cur.fetchall()]
+        live_trades_rows = cur.fetchall()
+        live_trades_data = [{"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} for row in live_trades_rows] if live_trades_rows else [{"date": "N/A", "daily_trades": 0}]
+        
         cur.execute("""
             SELECT broker,
                    SUM(CASE WHEN holding_fee_daily < 0 THEN holding_fee_daily ELSE -holding_fee_daily END + swap_daily) as daily_fees,
