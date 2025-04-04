@@ -6,40 +6,18 @@ import logging
 import os
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
-
-# Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
-
-# Try to import redis, fall back to no caching if not available
-try:
-    import redis
-    redis_available = True
-except ImportError:
-    redis_available = False
-    logger.warning("Redis module not found. Caching will be disabled.")
 
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Redis connection (optional, embedded localhost for simplicity)
-if redis_available:
-    try:
-        redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-        redis_client.ping()  # Test connection
-        logger.info("Connected to Redis successfully")
-    except (redis.ConnectionError, Exception) as e:
-        redis_available = False
-        logger.warning(f"Redis connection failed: {e}. Caching will be disabled.")
-else:
-    redis_client = None
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("mt4_online_server")
 
-# Embedded database URL (replace with your actual DATABASE_URL if known)
-DB_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/mt4db")  # Default for local testing
+DB_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
     try:
@@ -56,9 +34,9 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        cur.execute("DROP TABLE IF EXISTS settings, accounts, history, alerts;")
+        cur.execute("DROP TABLE IF EXISTS settings;")
         cur.execute("""
-            CREATE TABLE accounts (
+            CREATE TABLE IF NOT EXISTS accounts (
                 broker TEXT NOT NULL,
                 account_number BIGINT PRIMARY KEY,
                 balance DOUBLE PRECISION DEFAULT 0,
@@ -97,11 +75,10 @@ def create_tables():
                 withdrawals_monthly DOUBLE PRECISION DEFAULT 0,
                 withdrawals_yearly DOUBLE PRECISION DEFAULT 0,
                 prev_day_pl DOUBLE PRECISION DEFAULT 0,
-                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0,
-                last_update TIMESTAMP WITH TIME ZONE
+                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0
             );
-            CREATE INDEX idx_accounts_account_number ON accounts (account_number);
-            CREATE INDEX idx_accounts_broker ON accounts (broker);
+            CREATE INDEX IF NOT EXISTS idx_accounts_account_number ON accounts (account_number);
+            CREATE INDEX IF NOT EXISTS idx_accounts_broker ON accounts (broker);
         """)
         cur.execute("""
             CREATE TABLE settings (
@@ -124,18 +101,19 @@ def create_tables():
             );
         """)
         cur.execute("""
-            CREATE TABLE history (
+            CREATE TABLE IF NOT EXISTS history (
                 id SERIAL PRIMARY KEY,
-                account_number BIGINT NOT NULL,
-                snapshot_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                account_number BIGINT,
                 balance DOUBLE PRECISION,
                 equity DOUBLE PRECISION,
                 margin_used DOUBLE PRECISION,
                 free_margin DOUBLE PRECISION,
-                margin_percent DOUBLE PRECISION,
-                open_trades INTEGER DEFAULT 0,
+                margin_level DOUBLE PRECISION,
+                open_trade INTEGER DEFAULT 0,
                 profit_loss DOUBLE PRECISION,
                 open_charts INTEGER,
+                deposit_withdrawal DOUBLE PRECISION,
+                margin_percent DOUBLE PRECISION,
                 realized_pl_daily DOUBLE PRECISION,
                 realized_pl_weekly DOUBLE PRECISION,
                 realized_pl_monthly DOUBLE PRECISION,
@@ -147,21 +125,15 @@ def create_tables():
                 realized_pl_alltime DOUBLE PRECISION,
                 holding_fee_daily DOUBLE PRECISION,
                 broker TEXT,
-                last_update TIMESTAMP WITH TIME ZONE,
-                CONSTRAINT unique_account_time UNIQUE (account_number, snapshot_time)
+                traded_pairs TEXT,
+                open_pairs_charts TEXT,
+                ea_names TEXT,
+                snapshot_time TIMESTAMP WITH TIME ZONE,
+                last_update TIMESTAMP WITH TIME ZONE
             );
-            CREATE INDEX idx_history_snapshot_time ON history (snapshot_time);
-            CREATE INDEX idx_history_account_number ON history (account_number);
-        """)
-        cur.execute("""
-            CREATE TABLE alerts (
-                id SERIAL PRIMARY KEY,
-                account_number BIGINT,
-                issue TEXT,
-                severity TEXT,
-                timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            CREATE INDEX idx_alerts_timestamp ON alerts (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_history_snapshot_time ON history (snapshot_time);
+            CREATE INDEX IF NOT EXISTS idx_history_account_number ON history (account_number);
+            CREATE INDEX IF NOT EXISTS idx_history_broker ON history (broker);
         """)
         conn.commit()
         logger.info("Tables created with indexes")
@@ -201,15 +173,6 @@ def receive_mt4_data():
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
         json_data["autotrading"] = json_data["autotrading"] == "true" or json_data["autotrading"] == True
-        if "last_update" in json_data:
-            try:
-                json_data["last_update"] = datetime.strptime(json_data["last_update"], "%Y.%m.%d %H:%M:%S").replace(tzinfo=pytz.UTC)
-            except ValueError as e:
-                logger.warning(f"Invalid last_update format: {e}. Using current time.")
-                json_data["last_update"] = datetime.now(pytz.UTC)
-        else:
-            json_data["last_update"] = datetime.now(pytz.UTC)
-
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -226,10 +189,10 @@ def receive_mt4_data():
                 swap_alltime, deposits_daily, deposits_weekly, deposits_monthly,
                 deposits_yearly, withdrawals_daily, withdrawals_weekly,
                 withdrawals_monthly, withdrawals_yearly, prev_day_pl,
-                prev_day_holding_fee, last_update
+                prev_day_holding_fee
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (account_number) DO UPDATE SET
                 broker = EXCLUDED.broker, balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity, margin_used = EXCLUDED.margin_used,
@@ -266,17 +229,14 @@ def receive_mt4_data():
                 withdrawals_monthly = EXCLUDED.withdrawals_monthly,
                 withdrawals_yearly = EXCLUDED.withdrawals_yearly,
                 prev_day_pl = EXCLUDED.prev_day_pl,
-                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee,
-                last_update = EXCLUDED.last_update;
-        """, tuple(json_data.get(field, None) for field in required_fields + ["last_update"]))
+                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
+        """, tuple(json_data[field] for field in required_fields))
         conn.commit()
         cur.close()
         conn.close()
         logger.info(f"✅ Data stored for account {json_data['account_number']}")
         socketio.emit('account_update', json_data)
         check_alerts(json_data)
-        if redis_available:
-            redis_client.delete("quickstats", "analytics")
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
@@ -305,12 +265,6 @@ def check_alerts(account_data):
             if not account_data['autotrading']:
                 alerts.append({"account_number": account_data['account_number'], "issue": "EA Stopped", "severity": "critical"})
         if alerts:
-            for alert in alerts:
-                cur.execute("""
-                    INSERT INTO alerts (account_number, issue, severity, timestamp)
-                    VALUES (%s, %s, %s, NOW());
-                """, (alert["account_number"], alert["issue"], alert["severity"]))
-            conn.commit()
             socketio.emit('alert', alerts)
     except Exception as e:
         logger.error(f"Alert Check Error: {str(e)}")
@@ -320,49 +274,23 @@ def check_alerts(account_data):
 
 @app.route("/api/accounts", methods=["GET"])
 def get_accounts():
-    sort_column = request.args.get('sort', 'profit_loss')
-    sort_direction = request.args.get('direction', 'desc').upper()
-    page = int(request.args.get('page', 1))
-    limit = int(request.args.get('limit', 10))
-    offset = (page - 1) * limit
-
-    valid_columns = ["broker", "account_number", "balance", "equity", "free_margin", "margin_percent", 
-                     "profit_loss", "open_charts", "open_trades", "autotrading", "last_update"]
-    sort_column = sort_column if sort_column in valid_columns else "profit_loss"
-    sort_direction = sort_direction if sort_direction in ["ASC", "DESC"] else "DESC"
-
     try:
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        query = f"""
-            SELECT * FROM accounts
-            ORDER BY {sort_column} {sort_direction}
-            LIMIT %s OFFSET %s;
-        """
-        cur.execute(query, (limit, offset))
+        cur.execute("SELECT * FROM accounts;")
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
-        accounts = [dict(zip(columns, row)) for row in rows]
-        for account in accounts:
-            if 'last_update' in account and account['last_update']:
-                account['last_update'] = account['last_update'].isoformat()
         cur.close()
         conn.close()
-        return jsonify({"accounts": accounts, "page": page, "limit": limit})
+        return jsonify({"accounts": [dict(zip(columns, row)) for row in rows]})
     except Exception as e:
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/quickstats", methods=["GET"])
 def get_quickstats():
-    cache_key = "quickstats"
-    if redis_available:
-        cached = redis_client.get(cache_key)
-        if cached:
-            return jsonify(json.loads(cached))
-    
     try:
         conn = get_db_connection()
         if not conn:
@@ -374,9 +302,7 @@ def get_quickstats():
                    SUM(profit_loss) as total_pl,
                    SUM(CASE WHEN broker = 'Raw Trading Ltd'
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
-                            ELSE realized_pl_alltime END) as all_time_pl,
-                   COUNT(CASE WHEN autotrading THEN 1 END) as total_active_eas,
-                   (SELECT COUNT(*) FROM alerts WHERE timestamp > NOW() - INTERVAL '24 hours') as alert_count
+                            ELSE realized_pl_alltime END) as all_time_pl
             FROM accounts;
         """)
         stats = cur.fetchone()
@@ -384,45 +310,33 @@ def get_quickstats():
         total_equity = stats[1] or 0
         total_pl = stats[2] or 0
         all_time_pl = stats[3] or 0
-        total_active_eas = stats[4] or 0
-        alert_count = stats[5] or 0
         net_profit = (all_time_pl / (total_balance - all_time_pl)) * 100 if (total_balance - all_time_pl) != 0 else 0
-        result = {
+        cur.close()
+        conn.close()
+        return jsonify({
             "total_balance": total_balance,
             "total_equity": total_equity,
             "total_pl": total_pl,
-            "net_profit": net_profit,
-            "total_active_eas": total_active_eas,
-            "alert_count": alert_count
-        }
-        if redis_available:
-            redis_client.setex(cache_key, 10, json.dumps(result))
-        cur.close()
-        conn.close()
-        return jsonify(result)
+            "net_profit": net_profit
+        })
     except Exception as e:
         logger.error(f"Quick Stats Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/analytics", methods=["GET"])
 def get_analytics():
-    cache_key = "analytics"
-    if redis_available:
-        cached = redis_client.get(cache_key)
-        if cached:
-            return jsonify(json.loads(cached))
-    
     try:
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
+        # Balance per Broker with correct account count
         cur.execute("""
-            SELECT broker,
-                   SUM(balance) as total_balance,
-                   SUM(equity) as total_equity,
-                   SUM(profit_loss) as total_pl,
+            SELECT broker, 
+                   SUM(balance) as total_balance, 
+                   SUM(equity) as total_equity, 
+                   SUM(profit_loss) as total_pl, 
                    SUM(open_trades) as total_trades,
                    SUM(prev_day_pl) as prev_day_pl,
                    SUM(realized_pl_daily) as realized_pl_daily,
@@ -435,20 +349,22 @@ def get_analytics():
         """)
         balance_data = [
             {
-                "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3],
-                "trades": row[4], "prev_day_pl": row[5], "realized_pl_daily": row[6],
-                "realized_pl_weekly": row[7], "realized_pl_monthly": row[8],
+                "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
+                "trades": row[4], "prev_day_pl": row[5], "realized_pl_daily": row[6], 
+                "realized_pl_weekly": row[7], "realized_pl_monthly": row[8], 
                 "realized_pl_yearly": row[9], "realized_pl_alltime": row[10],
                 "accountsCount": row[11]
             } for row in cur.fetchall()
         ]
 
+        # Yearly Profits per Broker
         cur.execute("""
-            SELECT broker, SUM(realized_pl_yearly) as yearly_pl
+            SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
             FROM accounts GROUP BY broker;
         """)
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
 
+        # Margin Health
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
                    COUNT(*) FILTER (WHERE free_margin >= 0 AND free_margin <= 500) as zero_to_500,
@@ -462,24 +378,39 @@ def get_analytics():
             "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
         }
 
-        cur.execute("SELECT account_number, realized_pl_daily FROM accounts ORDER BY realized_pl_daily DESC LIMIT 5;")
+        # Top Performing Accounts
+        cur.execute("""
+            SELECT account_number, realized_pl_daily 
+            FROM accounts 
+            ORDER BY realized_pl_daily DESC LIMIT 5;
+        """)
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
-        cur.execute("SELECT account_number, realized_pl_monthly FROM accounts ORDER BY realized_pl_monthly DESC LIMIT 5;")
+        cur.execute("""
+            SELECT account_number, realized_pl_monthly 
+            FROM accounts 
+            ORDER BY realized_pl_monthly DESC LIMIT 5;
+        """)
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
-        cur.execute("SELECT account_number, realized_pl_yearly FROM accounts ORDER BY realized_pl_yearly DESC LIMIT 5;")
+        cur.execute("""
+            SELECT account_number, realized_pl_yearly 
+            FROM accounts 
+            ORDER BY realized_pl_yearly DESC LIMIT 5;
+        """)
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
 
+        # Drawdown per Broker
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts GROUP BY broker;
         """)
         drawdown_data = [
-            {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0}
+            {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} 
             for row in cur.fetchall()
         ]
 
+        # Floating P/L Daily Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date,
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(profit_loss) as daily_pl
             FROM history
             WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
@@ -487,12 +418,13 @@ def get_analytics():
             ORDER BY date ASC;
         """)
         floating_pl_data = [
-            {"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0}
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} 
             for row in cur.fetchall()
         ]
 
+        # Daily Live Trades Curve (last 7 days with Beirut timezone)
         cur.execute("""
-            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date,
+            SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(open_trades) as daily_trades
             FROM history
             WHERE snapshot_time >= (NOW() AT TIME ZONE 'Asia/Beirut' - INTERVAL '7 days')
@@ -500,10 +432,11 @@ def get_analytics():
             ORDER BY date ASC;
         """)
         live_trades_data = [
-            {"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0}
+            {"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} 
             for row in cur.fetchall()
         ]
 
+        # Fees per Broker
         cur.execute("""
             SELECT broker,
                    SUM(CASE WHEN holding_fee_daily < 0 THEN holding_fee_daily ELSE -holding_fee_daily END + swap_daily) as daily_fees,
@@ -515,11 +448,12 @@ def get_analytics():
             FROM accounts GROUP BY broker;
         """)
         fees_data = [
-            {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2],
-             "monthly": row[3], "yearly": row[4], "alltime": row[5]}
+            {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], 
+             "monthly": row[3], "yearly": row[4], "alltime": row[5]} 
             for row in cur.fetchall()
         ]
 
+        # Deposits and Withdrawals per Broker
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
@@ -530,13 +464,14 @@ def get_analytics():
             FROM accounts GROUP BY broker;
         """)
         deposits_withdrawals_data = [
-            {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2],
-             "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5],
-             "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8],
-             "alltime_deposits": row[9], "alltime_withdrawals": row[10]}
+            {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], 
+             "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], 
+             "monthly_withdrawals": row[6], "yearly_deposits": row[7], "yearly_withdrawals": row[8], 
+             "alltime_deposits": row[9], "alltime_withdrawals": row[10]} 
             for row in cur.fetchall()
         ]
 
+        # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) + SUM(withdrawals_daily) as daily_balance,
@@ -547,15 +482,15 @@ def get_analytics():
             FROM accounts GROUP BY broker;
         """)
         dw_balance_data = [
-            {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0,
-             "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0}
+            {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0, 
+             "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0} 
             for row in cur.fetchall()
         ]
 
         cur.close()
         conn.close()
 
-        result = {
+        return jsonify({
             "balance_per_broker": balance_data,
             "yearly_profits": yearly_pl_data,
             "margin_health": margin_health_data,
@@ -568,10 +503,7 @@ def get_analytics():
             "fees": fees_data,
             "deposits_withdrawals": deposits_withdrawals_data,
             "dw_balance": dw_balance_data
-        }
-        if redis_available:
-            redis_client.setex(cache_key, 10, json.dumps(result))
-        return jsonify(result)
+        })
     except Exception as e:
         logger.error(f"Analytics Fetch Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -595,10 +527,7 @@ def get_settings():
         conn.close()
         if settings:
             columns = [desc[0] for desc in cur.description]
-            settings_dict = dict(zip(columns, settings))
-            if 'default_settings_timestamp' in settings_dict and settings_dict['default_settings_timestamp']:
-                settings_dict['default_settings_timestamp'] = settings_dict['default_settings_timestamp'].isoformat()
-            return jsonify(settings_dict)
+            return jsonify(dict(zip(columns, settings)))
         return jsonify({})
     except Exception as e:
         logger.error(f"Settings Fetch Error: {str(e)}")
@@ -678,14 +607,15 @@ def save_history():
             beirut_time = snapshot_time.astimezone(local_tz)
             cur.execute("""
                 INSERT INTO history (
-                    account_number, balance, equity, margin_used, free_margin, margin_percent,
-                    open_trades, profit_loss, open_charts, realized_pl_daily, realized_pl_weekly,
-                    realized_pl_monthly, realized_pl_yearly, autotrading, empty_charts,
-                    deposits_alltime, withdrawals_alltime, realized_pl_alltime, holding_fee_daily,
-                    broker, snapshot_time, last_update
+                    account_number, balance, equity, margin_used, free_margin, margin_level,
+                    open_trade, profit_loss, open_charts, deposit_withdrawal, margin_percent,
+                    realized_pl_daily, realized_pl_weekly, realized_pl_monthly, realized_pl_yearly,
+                    autotrading, empty_charts, deposits_alltime, withdrawals_alltime,
+                    realized_pl_alltime, holding_fee_daily, broker, traded_pairs,
+                    open_pairs_charts, ea_names, snapshot_time, last_update
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT ON CONSTRAINT unique_account_time DO NOTHING
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
             """, (
                 entry.get('account_number'),
                 entry.get('balance'),
@@ -696,6 +626,8 @@ def save_history():
                 entry.get('open_trades', 0),
                 entry.get('profit_loss'),
                 entry.get('open_charts'),
+                0,
+                entry.get('margin_percent'),
                 entry.get('realized_pl_daily'),
                 entry.get('realized_pl_weekly'),
                 entry.get('realized_pl_monthly'),
@@ -707,6 +639,9 @@ def save_history():
                 entry.get('realized_pl_alltime'),
                 entry.get('holding_fee_daily'),
                 entry.get('broker'),
+                None,
+                None,
+                None,
                 beirut_time,
                 beirut_time
             ))
@@ -747,43 +682,18 @@ def get_history():
         cur.execute(query, params)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
-        history = [dict(zip(columns, row)) for row in rows]
-        for record in history:
-            if 'snapshot_time' in record and record['snapshot_time']:
-                record['snapshot_time'] = record['snapshot_time'].isoformat()
-            if 'last_update' in record and record['last_update']:
-                record['last_update'] = record['last_update'].isoformat()
         cur.close()
         conn.close()
-        return jsonify({"history": history})
+        return jsonify({"history": [dict(zip(columns, row)) for row in rows]})
     except Exception as e:
         logger.error(f"History Fetch Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/alerts", methods=["GET"])
-def get_alerts():
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 50;")
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        alerts = [dict(zip(columns, row)) for row in rows]
-        for alert in alerts:
-            if 'timestamp' in alert and alert['timestamp']:
-                alert['timestamp'] = alert['timestamp'].isoformat()
-        cur.close()
-        conn.close()
-        return jsonify({"alerts": alerts})
-    except Exception as e:
-        logger.error(f"Alerts Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
+
+scheduler = BackgroundScheduler()
 
 def emit_account_updates():
     try:
@@ -795,20 +705,16 @@ def emit_account_updates():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
-        for account in accounts:
-            if 'last_update' in account and account['last_update']:
-                account['last_update'] = account['last_update'].isoformat()
         socketio.emit('account_update', {"accounts": accounts})
         cur.close()
         conn.close()
     except Exception as e:
-        logger.error(f"Periodic Update Error: {str(e)}")
+        logger.error(f"Periodic Update Error: {e}")
 
-scheduler = BackgroundScheduler()
 scheduler.add_job(emit_account_updates, 'interval', seconds=5)
 scheduler.start()
 
 create_tables()
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)  # Embedded port for simplicity
+    socketio.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
