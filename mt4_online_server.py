@@ -26,7 +26,7 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Redis connection (only if redis is available)
+# Redis connection (optional, embedded localhost for simplicity)
 if redis_available:
     try:
         redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
@@ -38,7 +38,8 @@ if redis_available:
 else:
     redis_client = None
 
-DB_URL = os.getenv("DATABASE_URL")
+# Embedded database URL (replace with your actual DATABASE_URL if known)
+DB_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/mt4db")  # Default for local testing
 
 def get_db_connection():
     try:
@@ -193,14 +194,13 @@ def receive_mt4_data():
             "deposits_daily", "deposits_weekly", "deposits_monthly",
             "deposits_yearly", "withdrawals_daily", "withdrawals_weekly",
             "withdrawals_monthly", "withdrawals_yearly", "prev_day_pl",
-            "prev_day_holding_fee"  # Removed "last_update" from required fields
+            "prev_day_holding_fee"
         ]
         for field in required_fields:
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
         json_data["autotrading"] = json_data["autotrading"] == "true" or json_data["autotrading"] == True
-        # Handle last_update as optional
         if "last_update" in json_data:
             try:
                 json_data["last_update"] = datetime.strptime(json_data["last_update"], "%Y.%m.%d %H:%M:%S").replace(tzinfo=pytz.UTC)
@@ -345,7 +345,6 @@ def get_accounts():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
-        # Convert datetime to string for JSON serialization
         for account in accounts:
             if 'last_update' in account and account['last_update']:
                 account['last_update'] = account['last_update'].isoformat()
@@ -796,7 +795,6 @@ def emit_account_updates():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
-        # Convert datetime to string for JSON serialization
         for account in accounts:
             if 'last_update' in account and account['last_update']:
                 account['last_update'] = account['last_update'].isoformat()
@@ -813,4 +811,4 @@ scheduler.start()
 create_tables()
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    socketio.run(app, host="0.0.0.0", port=5000)  # Embedded port for simplicity
