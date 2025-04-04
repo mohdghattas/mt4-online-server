@@ -9,14 +9,31 @@ import re
 from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
-import redis
+
+# Try to import redis, fall back to no caching if not available
+try:
+    import redis
+    redis_available = True
+except ImportError:
+    redis_available = False
+    logger = logging.getLogger("mt4_online_server")
+    logger.warning("Redis module not found. Caching will be disabled.")
 
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Redis connection (adjust host/port if using a hosted instance)
-redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+# Redis connection (only if redis is available)
+if redis_available:
+    try:
+        redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        redis_client.ping()  # Test connection
+        logger.info("Connected to Redis successfully")
+    except (redis.ConnectionError, Exception) as e:
+        redis_available = False
+        logger.warning(f"Redis connection failed: {e}. Caching will be disabled.")
+else:
+    redis_client = None
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
@@ -38,10 +55,7 @@ def create_tables():
         return
     cur = conn.cursor()
     try:
-        # Drop existing tables to ensure clean schema (remove in production)
         cur.execute("DROP TABLE IF EXISTS settings, accounts, history, alerts;")
-        
-        # Accounts table with last_update
         cur.execute("""
             CREATE TABLE accounts (
                 broker TEXT NOT NULL,
@@ -88,8 +102,6 @@ def create_tables():
             CREATE INDEX idx_accounts_account_number ON accounts (account_number);
             CREATE INDEX idx_accounts_broker ON accounts (broker);
         """)
-        
-        # Settings table
         cur.execute("""
             CREATE TABLE settings (
                 user_id TEXT PRIMARY KEY,
@@ -110,8 +122,6 @@ def create_tables():
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
         """)
-        
-        # History table with unique constraint
         cur.execute("""
             CREATE TABLE history (
                 id SERIAL PRIMARY KEY,
@@ -142,8 +152,6 @@ def create_tables():
             CREATE INDEX idx_history_snapshot_time ON history (snapshot_time);
             CREATE INDEX idx_history_account_number ON history (account_number);
         """)
-        
-        # Alerts table for history tracking
         cur.execute("""
             CREATE TABLE alerts (
                 id SERIAL PRIMARY KEY,
@@ -154,7 +162,6 @@ def create_tables():
             );
             CREATE INDEX idx_alerts_timestamp ON alerts (timestamp);
         """)
-        
         conn.commit()
         logger.info("Tables created with indexes")
     except Exception as e:
@@ -259,7 +266,8 @@ def receive_mt4_data():
         logger.info(f"✅ Data stored for account {json_data['account_number']}")
         socketio.emit('account_update', json_data)
         check_alerts(json_data)
-        redis_client.delete("quickstats", "analytics")  # Invalidate caches
+        if redis_available:
+            redis_client.delete("quickstats", "analytics")  # Invalidate caches
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
@@ -337,9 +345,10 @@ def get_accounts():
 @app.route("/api/quickstats", methods=["GET"])
 def get_quickstats():
     cache_key = "quickstats"
-    cached = redis_client.get(cache_key)
-    if cached:
-        return jsonify(json.loads(cached))
+    if redis_available:
+        cached = redis_client.get(cache_key)
+        if cached:
+            return jsonify(json.loads(cached))
     
     try:
         conn = get_db_connection()
@@ -373,7 +382,8 @@ def get_quickstats():
             "total_active_eas": total_active_eas,
             "alert_count": alert_count
         }
-        redis_client.setex(cache_key, 10, json.dumps(result))  # Cache for 10 seconds
+        if redis_available:
+            redis_client.setex(cache_key, 10, json.dumps(result))  # Cache for 10 seconds
         cur.close()
         conn.close()
         return jsonify(result)
@@ -384,9 +394,10 @@ def get_quickstats():
 @app.route("/api/analytics", methods=["GET"])
 def get_analytics():
     cache_key = "analytics"
-    cached = redis_client.get(cache_key)
-    if cached:
-        return jsonify(json.loads(cached))
+    if redis_available:
+        cached = redis_client.get(cache_key)
+        if cached:
+            return jsonify(json.loads(cached))
     
     try:
         conn = get_db_connection()
@@ -394,7 +405,6 @@ def get_analytics():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
 
-        # Balance per Broker with correct account count
         cur.execute("""
             SELECT broker,
                    SUM(balance) as total_balance,
@@ -420,14 +430,12 @@ def get_analytics():
             } for row in cur.fetchall()
         ]
 
-        # Yearly Profits per Broker
         cur.execute("""
             SELECT broker, SUM(realized_pl_yearly) as yearly_pl
             FROM accounts GROUP BY broker;
         """)
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
 
-        # Margin Health
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
                    COUNT(*) FILTER (WHERE free_margin >= 0 AND free_margin <= 500) as zero_to_500,
@@ -441,7 +449,6 @@ def get_analytics():
             "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
         }
 
-        # Top Performing Accounts
         cur.execute("SELECT account_number, realized_pl_daily FROM accounts ORDER BY realized_pl_daily DESC LIMIT 5;")
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("SELECT account_number, realized_pl_monthly FROM accounts ORDER BY realized_pl_monthly DESC LIMIT 5;")
@@ -449,7 +456,6 @@ def get_analytics():
         cur.execute("SELECT account_number, realized_pl_yearly FROM accounts ORDER BY realized_pl_yearly DESC LIMIT 5;")
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
 
-        # Drawdown per Broker
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts GROUP BY broker;
@@ -459,7 +465,6 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Floating P/L Daily Curve (last 7 days, Beirut timezone)
         cur.execute("""
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date,
                    SUM(profit_loss) as daily_pl
@@ -473,7 +478,6 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Daily Live Trades Curve (last 7 days, Beirut timezone)
         cur.execute("""
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date,
                    SUM(open_trades) as daily_trades
@@ -487,7 +491,6 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Fees per Broker
         cur.execute("""
             SELECT broker,
                    SUM(CASE WHEN holding_fee_daily < 0 THEN holding_fee_daily ELSE -holding_fee_daily END + swap_daily) as daily_fees,
@@ -504,7 +507,6 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Deposits and Withdrawals per Broker
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
@@ -522,7 +524,6 @@ def get_analytics():
             for row in cur.fetchall()
         ]
 
-        # Deposits and Withdrawals Balance per Broker
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) + SUM(withdrawals_daily) as daily_balance,
@@ -555,7 +556,8 @@ def get_analytics():
             "deposits_withdrawals": deposits_withdrawals_data,
             "dw_balance": dw_balance_data
         }
-        redis_client.setex(cache_key, 10, json.dumps(result))  # Cache for 10 seconds
+        if redis_available:
+            redis_client.setex(cache_key, 10, json.dumps(result))
         return jsonify(result)
     except Exception as e:
         logger.error(f"Analytics Fetch Error: {str(e)}", exc_info=True)
