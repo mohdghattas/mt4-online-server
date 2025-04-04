@@ -10,13 +10,16 @@ from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# Set up logging before any other imports or logic
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("mt4_online_server")
+
 # Try to import redis, fall back to no caching if not available
 try:
     import redis
     redis_available = True
 except ImportError:
     redis_available = False
-    logger = logging.getLogger("mt4_online_server")
     logger.warning("Redis module not found. Caching will be disabled.")
 
 app = Flask(__name__)
@@ -34,9 +37,6 @@ if redis_available:
         logger.warning(f"Redis connection failed: {e}. Caching will be disabled.")
 else:
     redis_client = None
-
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("mt4_online_server")
 
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -383,7 +383,7 @@ def get_quickstats():
             "alert_count": alert_count
         }
         if redis_available:
-            redis_client.setex(cache_key, 10, json.dumps(result))  # Cache for 10 seconds
+            redis_client.setex(cache_key, 10, json.dumps(result))
         cur.close()
         conn.close()
         return jsonify(result)
