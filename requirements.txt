@@ -7,3 +7,4 @@ requests
 psycopg2-binary
 flask_socketio
 apscheduler
+redis>=4.0.0
