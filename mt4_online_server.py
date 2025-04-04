@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# Set up logging before any other imports or logic
+# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("mt4_online_server")
 
@@ -193,14 +193,23 @@ def receive_mt4_data():
             "deposits_daily", "deposits_weekly", "deposits_monthly",
             "deposits_yearly", "withdrawals_daily", "withdrawals_weekly",
             "withdrawals_monthly", "withdrawals_yearly", "prev_day_pl",
-            "prev_day_holding_fee", "last_update"
+            "prev_day_holding_fee"  # Removed "last_update" from required fields
         ]
         for field in required_fields:
             if field not in json_data:
                 logger.error(f"❌ Missing field: {field}")
                 return jsonify({"error": f"Missing field: {field}"}), 400
         json_data["autotrading"] = json_data["autotrading"] == "true" or json_data["autotrading"] == True
-        json_data["last_update"] = datetime.strptime(json_data["last_update"], "%Y.%m.%d %H:%M:%S").replace(tzinfo=pytz.UTC)
+        # Handle last_update as optional
+        if "last_update" in json_data:
+            try:
+                json_data["last_update"] = datetime.strptime(json_data["last_update"], "%Y.%m.%d %H:%M:%S").replace(tzinfo=pytz.UTC)
+            except ValueError as e:
+                logger.warning(f"Invalid last_update format: {e}. Using current time.")
+                json_data["last_update"] = datetime.now(pytz.UTC)
+        else:
+            json_data["last_update"] = datetime.now(pytz.UTC)
+
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -259,7 +268,7 @@ def receive_mt4_data():
                 prev_day_pl = EXCLUDED.prev_day_pl,
                 prev_day_holding_fee = EXCLUDED.prev_day_holding_fee,
                 last_update = EXCLUDED.last_update;
-        """, tuple(json_data[field] for field in required_fields))
+        """, tuple(json_data.get(field, None) for field in required_fields + ["last_update"]))
         conn.commit()
         cur.close()
         conn.close()
@@ -267,7 +276,7 @@ def receive_mt4_data():
         socketio.emit('account_update', json_data)
         check_alerts(json_data)
         if redis_available:
-            redis_client.delete("quickstats", "analytics")  # Invalidate caches
+            redis_client.delete("quickstats", "analytics")
         return jsonify({"message": "Data stored successfully"}), 200
     except Exception as e:
         logger.error(f"❌ API Processing Error: {str(e)}", exc_info=True)
@@ -335,9 +344,14 @@ def get_accounts():
         cur.execute(query, (limit, offset))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
+        accounts = [dict(zip(columns, row)) for row in rows]
+        # Convert datetime to string for JSON serialization
+        for account in accounts:
+            if 'last_update' in account and account['last_update']:
+                account['last_update'] = account['last_update'].isoformat()
         cur.close()
         conn.close()
-        return jsonify({"accounts": [dict(zip(columns, row)) for row in rows], "page": page, "limit": limit})
+        return jsonify({"accounts": accounts, "page": page, "limit": limit})
     except Exception as e:
         logger.error(f"API Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -582,7 +596,10 @@ def get_settings():
         conn.close()
         if settings:
             columns = [desc[0] for desc in cur.description]
-            return jsonify(dict(zip(columns, settings)))
+            settings_dict = dict(zip(columns, settings))
+            if 'default_settings_timestamp' in settings_dict and settings_dict['default_settings_timestamp']:
+                settings_dict['default_settings_timestamp'] = settings_dict['default_settings_timestamp'].isoformat()
+            return jsonify(settings_dict)
         return jsonify({})
     except Exception as e:
         logger.error(f"Settings Fetch Error: {str(e)}")
@@ -731,9 +748,15 @@ def get_history():
         cur.execute(query, params)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
+        history = [dict(zip(columns, row)) for row in rows]
+        for record in history:
+            if 'snapshot_time' in record and record['snapshot_time']:
+                record['snapshot_time'] = record['snapshot_time'].isoformat()
+            if 'last_update' in record and record['last_update']:
+                record['last_update'] = record['last_update'].isoformat()
         cur.close()
         conn.close()
-        return jsonify({"history": [dict(zip(columns, row)) for row in rows]})
+        return jsonify({"history": history})
     except Exception as e:
         logger.error(f"History Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -748,9 +771,13 @@ def get_alerts():
         cur.execute("SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 50;")
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
+        alerts = [dict(zip(columns, row)) for row in rows]
+        for alert in alerts:
+            if 'timestamp' in alert and alert['timestamp']:
+                alert['timestamp'] = alert['timestamp'].isoformat()
         cur.close()
         conn.close()
-        return jsonify({"alerts": [dict(zip(columns, row)) for row in rows]})
+        return jsonify({"alerts": alerts})
     except Exception as e:
         logger.error(f"Alerts Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -769,11 +796,15 @@ def emit_account_updates():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
+        # Convert datetime to string for JSON serialization
+        for account in accounts:
+            if 'last_update' in account and account['last_update']:
+                account['last_update'] = account['last_update'].isoformat()
         socketio.emit('account_update', {"accounts": accounts})
         cur.close()
         conn.close()
     except Exception as e:
-        logger.error(f"Periodic Update Error: {e}")
+        logger.error(f"Periodic Update Error: {str(e)}")
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(emit_account_updates, 'interval', seconds=5)
