@@ -672,6 +672,51 @@ def save_history():
         logger.error(f"History Save Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/closed_trades", methods=["GET"])
+def get_closed_trades():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        cur = conn.cursor()
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        result = cur.fetchone()
+        timeout = result[0] if result else 300
+        # Approximate closed trades by counting significant daily P/L updates
+        cur.execute("""
+            SELECT 
+                broker, 
+                account_number,
+                COUNT(*) as closed_trades
+            FROM history
+            WHERE snapshot_time >= NOW() - INTERVAL '1 day'
+            AND realized_pl_daily != 0
+            AND last_update >= NOW() - INTERVAL '%s minutes'
+            GROUP BY broker, account_number;
+        """, (timeout,))
+        rows = cur.fetchall()
+        closed_trades_data = [
+            {"broker": row[0], "account_number": row[1], "closed_trades": row[2]} 
+            for row in cur.fetchall()
+        ]
+        # Aggregate by broker
+        broker_closed_trades = {}
+        for entry in closed_trades_data:
+            broker = entry["broker"]
+            if broker not in broker_closed_trades:
+                broker_closed_trades[broker] = 0
+            broker_closed_trades[broker] += entry["closed_trades"]
+        broker_data = [{"broker": k, "closed_trades": v} for k, v in broker_closed_trades.items()]
+        cur.close()
+        conn.close()
+        return jsonify({
+            "by_account": closed_trades_data,
+            "by_broker": broker_data
+        })
+    except Exception as e:
+        logger.error(f"Closed Trades Fetch Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/history", methods=["GET"])
 def get_history():
     try:
