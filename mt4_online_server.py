@@ -268,7 +268,7 @@ def check_alerts(account_data):
             if account_data['profit_loss'] < thresholds['profit_loss']:
                 alerts.append({"account_number": account_data['account_number'], "issue": f"High Loss: {account_data['profit_loss']}", "severity": "warning"})
             if account_data['margin_percent'] < thresholds['margin_percent']:
-                alerts.append({"account_number": account_data['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
+                alerts.append({"account_number": account_number['account_number'], "issue": f"Low Margin: {account_data['margin_percent']}%", "severity": "critical"})
             if account_data['open_trades'] > thresholds['open_trades']:
                 alerts.append({"account_number": account_data['account_number'], "issue": f"High Trade Volume: {account_data['open_trades']}", "severity": "warning"})
             if not account_data['autotrading']:
@@ -293,8 +293,8 @@ def get_accounts():
         timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes;
-        """, (timeout,))
+            WHERE last_update >= NOW() - INTERVAL %s;
+        """, (f"{timeout} minutes",))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
@@ -326,8 +326,8 @@ def get_quickstats():
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
                             ELSE realized_pl_alltime END) as all_time_pl
             FROM accounts
-            WHERE last_update >= NOW() - INTERVAL %s minutes;
-        """, (timeout,))
+            WHERE last_update >= NOW() - INTERVAL %s;
+        """, (f"{timeout} minutes",))
         stats = cur.fetchone()
         total_balance = stats[0] or 0
         total_equity = stats[1] or 0
@@ -370,9 +370,9 @@ def get_analytics():
                    SUM(realized_pl_alltime) as realized_pl_alltime,
                    COUNT(DISTINCT account_number) as accounts_count
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         balance_data = [
             {
                 "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
@@ -385,9 +385,9 @@ def get_analytics():
         cur.execute("""
             SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
@@ -395,8 +395,8 @@ def get_analytics():
                    COUNT(*) FILTER (WHERE free_margin > 500 AND free_margin <= 1000) as five_hundred_to_1000,
                    COUNT(*) FILTER (WHERE free_margin > 1000) as above_1000
             FROM accounts
-            WHERE last_update >= NOW() - INTERVAL %s minutes;
-        """, (timeout,))
+            WHERE last_update >= NOW() - INTERVAL %s;
+        """, (f"{timeout} minutes",))
         margin_health = cur.fetchone()
         margin_health_data = {
             "below_zero": margin_health[0], "zero_to_500": margin_health[1],
@@ -405,30 +405,30 @@ def get_analytics():
         cur.execute("""
             SELECT account_number, realized_pl_daily 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             ORDER BY realized_pl_daily DESC LIMIT 5;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_monthly 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             ORDER BY realized_pl_monthly DESC LIMIT 5;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_yearly 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             ORDER BY realized_pl_yearly DESC LIMIT 5;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         drawdown_data = [
             {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} 
             for row in cur.fetchall()
@@ -466,9 +466,9 @@ def get_analytics():
                    SUM(CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END + swap_alltime) as alltime_fees,
                    SUM(CASE WHEN prev_day_holding_fee < 0 THEN prev_day_holding_fee ELSE -prev_day_holding_fee END) as prev_day_holding_fee
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         fees_data = [
             {"broker": row[0], "prev_day_holding": row[5], "daily": row[0], "weekly": row[1], 
              "monthly": row[2], "yearly": row[3], "alltime": row[4]} 
@@ -482,9 +482,9 @@ def get_analytics():
                    SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals,
                    SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         deposits_withdrawals_data = [
             {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], 
              "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], 
@@ -500,9 +500,9 @@ def get_analytics():
                    SUM(deposits_yearly) + SUM(withdrawals_yearly) as yearly_balance,
                    SUM(deposits_alltime) + SUM(withdrawals_alltime) as alltime_balance
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes
+            WHERE last_update >= NOW() - INTERVAL %s
             GROUP BY broker;
-        """, (timeout,))
+        """, (f"{timeout} minutes",))
         dw_balance_data = [
             {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0, 
              "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0} 
@@ -740,8 +740,8 @@ def emit_account_updates():
         timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL %s minutes;
-        """, (timeout,))
+            WHERE last_update >= NOW() - INTERVAL %s;
+        """, (f"{timeout} minutes",))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
@@ -766,8 +766,8 @@ def cleanup_inactive_accounts():
         cur.execute("""
             SELECT account_number, broker 
             FROM accounts 
-            WHERE last_update < NOW() - INTERVAL %s minutes;
-        """, (timeout,))
+            WHERE last_update < NOW() - INTERVAL %s;
+        """, (f"{timeout} minutes",))
         inactive_accounts = cur.fetchall()
         for account in inactive_accounts:
             account_number, broker = account
