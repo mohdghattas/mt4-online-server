@@ -6,7 +6,7 @@ import logging
 import os
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -98,12 +98,13 @@ def create_tables():
                 broker_offsets JSON DEFAULT '{"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6}',
                 alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
                 alerts_enabled BOOLEAN DEFAULT TRUE,
-                account_timeout INTEGER DEFAULT 300,
+                sound_enabled BOOLEAN DEFAULT FALSE,
+                account_timeout INTEGER DEFAULT 2,
                 focus_group JSON DEFAULT '[]',
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
             INSERT INTO settings (user_id, account_timeout) 
-            VALUES ('default', 300) 
+            VALUES ('default', 2) 
             ON CONFLICT (user_id) DO NOTHING;
         """)
         cur.execute("""
@@ -242,6 +243,7 @@ def receive_mt4_data():
         cur.close()
         conn.close()
         logger.info(f"✅ Data stored for account {json_data['account_number']}")
+        json_data['last_update'] = datetime.now(pytz.UTC).isoformat()
         socketio.emit('account_update', json_data)
         check_alerts(json_data)
         return jsonify({"message": "Data stored successfully"}), 200
@@ -288,7 +290,7 @@ def get_accounts():
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        timeout = result[0] if result else 300
+        timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
             WHERE last_update >= NOW() - INTERVAL '%s minutes';
@@ -296,7 +298,6 @@ def get_accounts():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
-        # Convert last_update to ISO string
         for account in accounts:
             if account['last_update']:
                 account['last_update'] = account['last_update'].isoformat()
@@ -316,7 +317,7 @@ def get_quickstats():
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        timeout = result[0] if result else 300
+        timeout = result[0] if result else 2
         cur.execute("""
             SELECT SUM(balance) as total_balance,
                    SUM(equity) as total_equity,
@@ -354,7 +355,7 @@ def get_analytics():
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        timeout = result[0] if result else 300
+        timeout = result[0] if result else 2
         cur.execute("""
             SELECT broker, 
                    SUM(balance) as total_balance, 
@@ -469,8 +470,8 @@ def get_analytics():
             GROUP BY broker;
         """, (timeout,))
         fees_data = [
-            {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], 
-             "monthly": row[3], "yearly": row[4], "alltime": row[5]} 
+            {"broker": row[0], "prev_day_holding": row[5], "daily": row[0], "weekly": row[1], 
+             "monthly": row[2], "yearly": row[3], "alltime": row[4]} 
             for row in cur.fetchall()
         ]
         cur.execute("""
@@ -534,20 +535,25 @@ def get_closed_trades():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        cur.execute("SELECT account_timeout, gmt_offset FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        timeout = result[0] if result else 300
+        timeout = result[0] if result else 2
+        gmt_offset = result[1] if result else 3
+        now = datetime.now(pytz.UTC)
+        local_midnight = now.astimezone(pytz.timezone('Asia/Beirut')).replace(hour=0, minute=0, second=0, microsecond=0)
+        local_midnight = local_midnight.astimezone(pytz.UTC) - timedelta(hours=gmt_offset)
         cur.execute("""
             SELECT 
                 broker, 
                 account_number,
                 COUNT(*) as closed_trades
             FROM history
-            WHERE snapshot_time >= NOW() - INTERVAL '1 day'
+            WHERE snapshot_time >= %s
+            AND snapshot_time < %s + INTERVAL '1 day'
             AND realized_pl_daily != 0
-            AND last_update >= NOW() - INTERVAL '%s minutes'
+            AND last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker, account_number;
-        """, (timeout,))
+        """, (local_midnight, local_midnight, timeout))
         rows = cur.fetchall()
         closed_trades_data = [
             {"broker": row[0], "account_number": row[1], "closed_trades": row[2]} 
@@ -581,7 +587,7 @@ def get_settings():
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                    mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                   alerts_enabled, default_settings_timestamp, account_timeout, focus_group
+                   alerts_enabled, sound_enabled, default_settings_timestamp, account_timeout, focus_group
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -590,7 +596,6 @@ def get_settings():
         if settings:
             columns = [desc[0] for desc in cur.description]
             settings_dict = dict(zip(columns, settings))
-            # Convert default_settings_timestamp to ISO string
             if settings_dict['default_settings_timestamp']:
                 settings_dict['default_settings_timestamp'] = settings_dict['default_settings_timestamp'].isoformat()
             return jsonify(settings_dict)
@@ -613,8 +618,8 @@ def save_settings():
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                 mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                alerts_enabled, default_settings_timestamp, account_timeout, focus_group
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                alerts_enabled, sound_enabled, default_settings_timestamp, account_timeout, focus_group
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -630,6 +635,7 @@ def save_settings():
                 broker_offsets = EXCLUDED.broker_offsets,
                 alert_thresholds = EXCLUDED.alert_thresholds,
                 alerts_enabled = EXCLUDED.alerts_enabled,
+                sound_enabled = EXCLUDED.sound_enabled,
                 default_settings_timestamp = EXCLUDED.default_settings_timestamp,
                 account_timeout = EXCLUDED.account_timeout,
                 focus_group = EXCLUDED.focus_group;
@@ -648,8 +654,9 @@ def save_settings():
             json.dumps(settings.get('broker_offsets', {"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6})),
             json.dumps(settings.get('alert_thresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
             settings.get('alerts_enabled', True),
+            settings.get('sound_enabled', False),
             settings.get('default_settings_timestamp'),
-            settings.get('account_timeout', 300),
+            settings.get('account_timeout', 2),
             json.dumps(settings.get('focus_group', []))
         ))
         conn.commit()
@@ -753,7 +760,6 @@ def get_history():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         history = [dict(zip(columns, row)) for row in rows]
-        # Convert datetime fields to ISO strings
         for entry in history:
             if entry['snapshot_time']:
                 entry['snapshot_time'] = entry['snapshot_time'].isoformat()
@@ -779,7 +785,7 @@ def emit_account_updates():
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        timeout = result[0] if result else 300
+        timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
             WHERE last_update >= NOW() - INTERVAL '%s minutes';
@@ -787,7 +793,6 @@ def emit_account_updates():
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
-        # Convert last_update to ISO string
         for account in accounts:
             if account['last_update']:
                 account['last_update'] = account['last_update'].isoformat()
@@ -797,7 +802,39 @@ def emit_account_updates():
     except Exception as e:
         logger.error(f"Periodic Update Error: {e}")
 
+def cleanup_inactive_accounts():
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        result = cur.fetchone()
+        timeout = result[0] if result else 2
+        cur.execute("""
+            SELECT account_number, broker 
+            FROM accounts 
+            WHERE last_update < NOW() - INTERVAL %s minutes;
+        """, (timeout,))
+        inactive_accounts = cur.fetchall()
+        for account in inactive_accounts:
+            account_number, broker = account
+            cur.execute("DELETE FROM accounts WHERE account_number = %s;", (account_number,))
+            socketio.emit('account_removed', {
+                "account_number": account_number,
+                "broker": broker,
+                "reason": "Inactivity timeout"
+            })
+        conn.commit()
+        cur.close()
+        conn.close()
+        if inactive_accounts:
+            logger.info(f"Removed {len(inactive_accounts)} inactive accounts")
+    except Exception as e:
+        logger.error(f"Inactive Accounts Cleanup Error: {e}")
+
 scheduler.add_job(emit_account_updates, 'interval', seconds=5)
+scheduler.add_job(cleanup_inactive_accounts, 'interval', minutes=1)
 scheduler.start()
 
 create_tables()
