@@ -75,7 +75,8 @@ def create_tables():
                 withdrawals_monthly DOUBLE PRECISION DEFAULT 0,
                 withdrawals_yearly DOUBLE PRECISION DEFAULT 0,
                 prev_day_pl DOUBLE PRECISION DEFAULT 0,
-                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0
+                prev_day_holding_fee DOUBLE PRECISION DEFAULT 0,
+                last_update TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_accounts_account_number ON accounts (account_number);
             CREATE INDEX IF NOT EXISTS idx_accounts_broker ON accounts (broker);
@@ -94,9 +95,11 @@ def create_tables():
                 mask_timer TEXT DEFAULT 'never',
                 font_size TEXT DEFAULT '14',
                 notes JSON,
-                broker_offsets JSON DEFAULT '{"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6}',
+                broker_offsets JSON DEFAULT '{"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6}',
                 alert_thresholds JSON DEFAULT '{"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}',
                 alerts_enabled BOOLEAN DEFAULT TRUE,
+                account_timeout INTEGER DEFAULT 300,
+                focus_group JSON DEFAULT '[]',
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
         """)
@@ -189,10 +192,10 @@ def receive_mt4_data():
                 swap_alltime, deposits_daily, deposits_weekly, deposits_monthly,
                 deposits_yearly, withdrawals_daily, withdrawals_weekly,
                 withdrawals_monthly, withdrawals_yearly, prev_day_pl,
-                prev_day_holding_fee
+                prev_day_holding_fee, last_update
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (account_number) DO UPDATE SET
                 broker = EXCLUDED.broker, balance = EXCLUDED.balance,
                 equity = EXCLUDED.equity, margin_used = EXCLUDED.margin_used,
@@ -229,7 +232,8 @@ def receive_mt4_data():
                 withdrawals_monthly = EXCLUDED.withdrawals_monthly,
                 withdrawals_yearly = EXCLUDED.withdrawals_yearly,
                 prev_day_pl = EXCLUDED.prev_day_pl,
-                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee;
+                prev_day_holding_fee = EXCLUDED.prev_day_holding_fee,
+                last_update = CURRENT_TIMESTAMP;
         """, tuple(json_data[field] for field in required_fields))
         conn.commit()
         cur.close()
@@ -279,7 +283,12 @@ def get_accounts():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-        cur.execute("SELECT * FROM accounts;")
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        timeout = cur.fetchone()[0] or 300
+        cur.execute("""
+            SELECT * FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds';
+        """, (timeout,))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         cur.close()
@@ -296,6 +305,8 @@ def get_quickstats():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        timeout = cur.fetchone()[0] or 300
         cur.execute("""
             SELECT SUM(balance) as total_balance,
                    SUM(equity) as total_equity,
@@ -303,8 +314,9 @@ def get_quickstats():
                    SUM(CASE WHEN broker = 'Raw Trading Ltd'
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
                             ELSE realized_pl_alltime END) as all_time_pl
-            FROM accounts;
-        """)
+            FROM accounts
+            WHERE last_update >= NOW() - INTERVAL '%s seconds';
+        """, (timeout,))
         stats = cur.fetchone()
         total_balance = stats[0] or 0
         total_equity = stats[1] or 0
@@ -330,8 +342,8 @@ def get_analytics():
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
-
-        # Balance per Broker with correct account count
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        timeout = cur.fetchone()[0] or 300
         cur.execute("""
             SELECT broker, 
                    SUM(balance) as total_balance, 
@@ -345,8 +357,10 @@ def get_analytics():
                    SUM(realized_pl_yearly) as realized_pl_yearly,
                    SUM(realized_pl_alltime) as realized_pl_alltime,
                    COUNT(DISTINCT account_number) as accounts_count
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         balance_data = [
             {
                 "broker": row[0], "balance": row[1], "equity": row[2], "profit_loss": row[3], 
@@ -356,59 +370,57 @@ def get_analytics():
                 "accountsCount": row[11]
             } for row in cur.fetchall()
         ]
-
-        # Yearly Profits per Broker
         cur.execute("""
             SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
-
-        # Margin Health
         cur.execute("""
             SELECT COUNT(*) FILTER (WHERE free_margin < 0) as below_zero,
                    COUNT(*) FILTER (WHERE free_margin >= 0 AND free_margin <= 500) as zero_to_500,
                    COUNT(*) FILTER (WHERE free_margin > 500 AND free_margin <= 1000) as five_hundred_to_1000,
                    COUNT(*) FILTER (WHERE free_margin > 1000) as above_1000
-            FROM accounts;
-        """)
+            FROM accounts
+            WHERE last_update >= NOW() - INTERVAL '%s seconds';
+        """, (timeout,))
         margin_health = cur.fetchone()
         margin_health_data = {
             "below_zero": margin_health[0], "zero_to_500": margin_health[1],
             "five_hundred_to_1000": margin_health[2], "above_1000": margin_health[3]
         }
-
-        # Top Performing Accounts
         cur.execute("""
             SELECT account_number, realized_pl_daily 
             FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
             ORDER BY realized_pl_daily DESC LIMIT 5;
-        """)
+        """, (timeout,))
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_monthly 
             FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
             ORDER BY realized_pl_monthly DESC LIMIT 5;
-        """)
+        """, (timeout,))
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_yearly 
             FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
             ORDER BY realized_pl_yearly DESC LIMIT 5;
-        """)
+        """, (timeout,))
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
-
-        # Drawdown per Broker
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         drawdown_data = [
             {"broker": row[0], "drawdown": ((row[1] - row[2]) / row[1] * 100) if row[1] > 0 else 0} 
             for row in cur.fetchall()
         ]
-
-        # Floating P/L Daily Curve (last 7 days with Beirut timezone)
         cur.execute("""
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(profit_loss) as daily_pl
@@ -421,8 +433,6 @@ def get_analytics():
             {"date": row[0].strftime('%d/%m/%Y'), "daily_pl": row[1] or 0} 
             for row in cur.fetchall()
         ]
-
-        # Daily Live Trades Curve (last 7 days with Beirut timezone)
         cur.execute("""
             SELECT DATE(snapshot_time AT TIME ZONE 'Asia/Beirut') as date, 
                    SUM(open_trades) as daily_trades
@@ -435,8 +445,6 @@ def get_analytics():
             {"date": row[0].strftime('%d/%m/%Y'), "daily_trades": row[1] or 0} 
             for row in cur.fetchall()
         ]
-
-        # Fees per Broker
         cur.execute("""
             SELECT broker,
                    SUM(CASE WHEN holding_fee_daily < 0 THEN holding_fee_daily ELSE -holding_fee_daily END + swap_daily) as daily_fees,
@@ -445,15 +453,15 @@ def get_analytics():
                    SUM(CASE WHEN holding_fee_yearly < 0 THEN holding_fee_yearly ELSE -holding_fee_yearly END + swap_yearly) as yearly_fees,
                    SUM(CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END + swap_alltime) as alltime_fees,
                    SUM(CASE WHEN prev_day_holding_fee < 0 THEN prev_day_holding_fee ELSE -prev_day_holding_fee END) as prev_day_holding_fee
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         fees_data = [
             {"broker": row[0], "prev_day_holding": row[6], "daily": row[1], "weekly": row[2], 
              "monthly": row[3], "yearly": row[4], "alltime": row[5]} 
             for row in cur.fetchall()
         ]
-
-        # Deposits and Withdrawals per Broker
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) as daily_deposits, SUM(withdrawals_daily) as daily_withdrawals,
@@ -461,8 +469,10 @@ def get_analytics():
                    SUM(deposits_monthly) as monthly_deposits, SUM(withdrawals_monthly) as monthly_withdrawals,
                    SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals,
                    SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         deposits_withdrawals_data = [
             {"broker": row[0], "daily_deposits": row[1], "daily_withdrawals": row[2], 
              "weekly_deposits": row[3], "weekly_withdrawals": row[4], "monthly_deposits": row[5], 
@@ -470,8 +480,6 @@ def get_analytics():
              "alltime_deposits": row[9], "alltime_withdrawals": row[10]} 
             for row in cur.fetchall()
         ]
-
-        # Deposits and Withdrawals Balance per Broker (fixed calculation)
         cur.execute("""
             SELECT broker,
                    SUM(deposits_daily) + SUM(withdrawals_daily) as daily_balance,
@@ -479,17 +487,17 @@ def get_analytics():
                    SUM(deposits_monthly) + SUM(withdrawals_monthly) as monthly_balance,
                    SUM(deposits_yearly) + SUM(withdrawals_yearly) as yearly_balance,
                    SUM(deposits_alltime) + SUM(withdrawals_alltime) as alltime_balance
-            FROM accounts GROUP BY broker;
-        """)
+            FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds'
+            GROUP BY broker;
+        """, (timeout,))
         dw_balance_data = [
             {"broker": row[0], "daily_balance": row[1] or 0, "weekly_balance": row[2] or 0, 
              "monthly_balance": row[3] or 0, "yearly_balance": row[4] or 0, "alltime_balance": row[5] or 0} 
             for row in cur.fetchall()
         ]
-
         cur.close()
         conn.close()
-
         return jsonify({
             "balance_per_broker": balance_data,
             "yearly_profits": yearly_pl_data,
@@ -519,7 +527,7 @@ def get_settings():
             SELECT sort_state, is_numbers_masked, gmt_offset, period_resets,
                    main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                    mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                   alerts_enabled, default_settings_timestamp
+                   alerts_enabled, default_settings_timestamp, account_timeout, focus_group
             FROM settings WHERE user_id = 'default';
         """)
         settings = cur.fetchone()
@@ -547,8 +555,8 @@ def save_settings():
                 user_id, sort_state, is_numbers_masked, gmt_offset, period_resets,
                 main_refresh_rate, critical_margin, warning_margin, is_dark_mode,
                 mask_timer, font_size, notes, broker_offsets, alert_thresholds,
-                alerts_enabled, default_settings_timestamp
-            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                alerts_enabled, default_settings_timestamp, account_timeout, focus_group
+            ) VALUES ('default', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 sort_state = EXCLUDED.sort_state,
                 is_numbers_masked = EXCLUDED.is_numbers_masked,
@@ -564,7 +572,9 @@ def save_settings():
                 broker_offsets = EXCLUDED.broker_offsets,
                 alert_thresholds = EXCLUDED.alert_thresholds,
                 alerts_enabled = EXCLUDED.alerts_enabled,
-                default_settings_timestamp = EXCLUDED.default_settings_timestamp;
+                default_settings_timestamp = EXCLUDED.default_settings_timestamp,
+                account_timeout = EXCLUDED.account_timeout,
+                focus_group = EXCLUDED.focus_group;
         """, (
             json.dumps(settings.get('sortState', {})),
             settings.get('isNumbersMasked', False),
@@ -577,10 +587,12 @@ def save_settings():
             settings.get('maskTimer', 'never'),
             settings.get('fontSize', '14'),
             json.dumps(settings.get('notes', {})),
-            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": -5, "Swissquote": -1, "XTB International": -6})),
+            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6})),
             json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
             settings.get('alertsEnabled', True),
-            settings.get('defaultSettingsTimestamp')
+            settings.get('defaultSettingsTimestamp'),
+            settings.get('accountTimeout', 300),
+            json.dumps(settings.get('focusGroup', []))
         ))
         conn.commit()
         cur.close()
@@ -694,14 +706,18 @@ def not_found(error):
     return jsonify({"error": "404 Not Found"}), 404
 
 scheduler = BackgroundScheduler()
-
 def emit_account_updates():
     try:
         conn = get_db_connection()
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("SELECT * FROM accounts;")
+        cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
+        timeout = cur.fetchone()[0] or 300
+        cur.execute("""
+            SELECT * FROM accounts 
+            WHERE last_update >= NOW() - INTERVAL '%s seconds';
+        """, (timeout,))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
         accounts = [dict(zip(columns, row)) for row in rows]
