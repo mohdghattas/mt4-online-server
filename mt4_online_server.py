@@ -259,7 +259,7 @@ def check_alerts(account_data):
     try:
         cur.execute("SELECT alert_thresholds, alerts_enabled FROM settings WHERE user_id = 'default';")
         result = cur.fetchone()
-        thresholds = json.loads(result[0]) if result else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
+        thresholds = result[0] if result and result[0] else {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50}
         alerts_enabled = result[1] if result else True
         alerts = []
         if alerts_enabled and account_data['open_trades'] > 0:
@@ -293,7 +293,7 @@ def get_accounts():
         timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes';
+            WHERE last_update >= NOW() - INTERVAL %s minutes;
         """, (timeout,))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
@@ -326,7 +326,7 @@ def get_quickstats():
                             THEN realized_pl_alltime + (CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END) + swap_alltime
                             ELSE realized_pl_alltime END) as all_time_pl
             FROM accounts
-            WHERE last_update >= NOW() - INTERVAL '%s minutes';
+            WHERE last_update >= NOW() - INTERVAL %s minutes;
         """, (timeout,))
         stats = cur.fetchone()
         total_balance = stats[0] or 0
@@ -370,7 +370,7 @@ def get_analytics():
                    SUM(realized_pl_alltime) as realized_pl_alltime,
                    COUNT(DISTINCT account_number) as accounts_count
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         balance_data = [
@@ -385,7 +385,7 @@ def get_analytics():
         cur.execute("""
             SELECT broker, SUM(realized_pl_yearly) as yearly_pl 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         yearly_pl_data = [{"broker": row[0], "yearly_pl": row[1]} for row in cur.fetchall()]
@@ -395,7 +395,7 @@ def get_analytics():
                    COUNT(*) FILTER (WHERE free_margin > 500 AND free_margin <= 1000) as five_hundred_to_1000,
                    COUNT(*) FILTER (WHERE free_margin > 1000) as above_1000
             FROM accounts
-            WHERE last_update >= NOW() - INTERVAL '%s minutes';
+            WHERE last_update >= NOW() - INTERVAL %s minutes;
         """, (timeout,))
         margin_health = cur.fetchone()
         margin_health_data = {
@@ -405,28 +405,28 @@ def get_analytics():
         cur.execute("""
             SELECT account_number, realized_pl_daily 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             ORDER BY realized_pl_daily DESC LIMIT 5;
         """, (timeout,))
         top_daily = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_monthly 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             ORDER BY realized_pl_monthly DESC LIMIT 5;
         """, (timeout,))
         top_monthly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT account_number, realized_pl_yearly 
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             ORDER BY realized_pl_yearly DESC LIMIT 5;
         """, (timeout,))
         top_yearly = [{"account_number": row[0], "pl": row[1]} for row in cur.fetchall()]
         cur.execute("""
             SELECT broker, SUM(balance) as total_balance, SUM(equity) as total_equity
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         drawdown_data = [
@@ -466,7 +466,7 @@ def get_analytics():
                    SUM(CASE WHEN holding_fee_alltime < 0 THEN holding_fee_alltime ELSE -holding_fee_alltime END + swap_alltime) as alltime_fees,
                    SUM(CASE WHEN prev_day_holding_fee < 0 THEN prev_day_holding_fee ELSE -prev_day_holding_fee END) as prev_day_holding_fee
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         fees_data = [
@@ -482,7 +482,7 @@ def get_analytics():
                    SUM(deposits_yearly) as yearly_deposits, SUM(withdrawals_yearly) as yearly_withdrawals,
                    SUM(deposits_alltime) as alltime_deposits, SUM(withdrawals_alltime) as alltime_withdrawals
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         deposits_withdrawals_data = [
@@ -500,7 +500,7 @@ def get_analytics():
                    SUM(deposits_yearly) + SUM(withdrawals_yearly) as yearly_balance,
                    SUM(deposits_alltime) + SUM(withdrawals_alltime) as alltime_balance
             FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes'
+            WHERE last_update >= NOW() - INTERVAL %s minutes
             GROUP BY broker;
         """, (timeout,))
         dw_balance_data = [
@@ -526,54 +526,6 @@ def get_analytics():
         })
     except Exception as e:
         logger.error(f"Analytics Fetch Error: {str(e)}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/api/closed_trades", methods=["GET"])
-def get_closed_trades():
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-        cur = conn.cursor()
-        cur.execute("SELECT account_timeout, gmt_offset FROM settings WHERE user_id = 'default';")
-        result = cur.fetchone()
-        timeout = result[0] if result else 2
-        gmt_offset = result[1] if result else 3
-        now = datetime.now(pytz.UTC)
-        local_midnight = now.astimezone(pytz.timezone('Asia/Beirut')).replace(hour=0, minute=0, second=0, microsecond=0)
-        local_midnight = local_midnight.astimezone(pytz.UTC) - timedelta(hours=gmt_offset)
-        cur.execute("""
-            SELECT 
-                broker, 
-                account_number,
-                COUNT(*) as closed_trades
-            FROM history
-            WHERE snapshot_time >= %s
-            AND snapshot_time < %s + INTERVAL '1 day'
-            AND realized_pl_daily != 0
-            AND last_update >= NOW() - INTERVAL %s minutes
-            GROUP BY broker, account_number;
-        """, (local_midnight, local_midnight, timeout))
-        rows = cur.fetchall()
-        closed_trades_data = [
-            {"broker": row[0], "account_number": row[1], "closed_trades": row[2]} 
-            for row in rows
-        ]
-        broker_closed_trades = {}
-        for entry in closed_trades_data:
-            broker = entry["broker"]
-            if broker not in broker_closed_trades:
-                broker_closed_trades[broker] = 0
-            broker_closed_trades[broker] += entry["closed_trades"]
-        broker_data = [{"broker": k, "closed_trades": v} for k, v in broker_closed_trades.items()]
-        cur.close()
-        conn.close()
-        return jsonify({
-            "by_account": closed_trades_data,
-            "by_broker": broker_data
-        })
-    except Exception as e:
-        logger.error(f"Closed Trades Fetch Error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/settings", methods=["GET"])
@@ -788,7 +740,7 @@ def emit_account_updates():
         timeout = result[0] if result else 2
         cur.execute("""
             SELECT * FROM accounts 
-            WHERE last_update >= NOW() - INTERVAL '%s minutes';
+            WHERE last_update >= NOW() - INTERVAL %s minutes;
         """, (timeout,))
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
