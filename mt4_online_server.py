@@ -102,6 +102,9 @@ def create_tables():
                 focus_group JSON DEFAULT '[]',
                 default_settings_timestamp TIMESTAMP WITH TIME ZONE
             );
+            INSERT INTO settings (user_id, account_timeout) 
+            VALUES ('default', 300) 
+            ON CONFLICT (user_id) DO NOTHING;
         """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS history (
@@ -139,7 +142,7 @@ def create_tables():
             CREATE INDEX IF NOT EXISTS idx_history_broker ON history (broker);
         """)
         conn.commit()
-        logger.info("Tables created with indexes")
+        logger.info("Tables created with indexes and default settings initialized")
     except Exception as e:
         logger.error(f"Table creation failed: {e}")
     finally:
@@ -284,7 +287,8 @@ def get_accounts():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
-        timeout = cur.fetchone()[0] or 300
+        result = cur.fetchone()
+        timeout = result[0] if result else 300
         cur.execute("""
             SELECT * FROM accounts 
             WHERE last_update >= NOW() - INTERVAL '%s seconds';
@@ -306,7 +310,8 @@ def get_quickstats():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
-        timeout = cur.fetchone()[0] or 300
+        result = cur.fetchone()
+        timeout = result[0] if result else 300
         cur.execute("""
             SELECT SUM(balance) as total_balance,
                    SUM(equity) as total_equity,
@@ -343,7 +348,8 @@ def get_analytics():
             return jsonify({"error": "Database connection failed"}), 500
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
-        timeout = cur.fetchone()[0] or 300
+        result = cur.fetchone()
+        timeout = result[0] if result else 300
         cur.execute("""
             SELECT broker, 
                    SUM(balance) as total_balance, 
@@ -576,23 +582,23 @@ def save_settings():
                 account_timeout = EXCLUDED.account_timeout,
                 focus_group = EXCLUDED.focus_group;
         """, (
-            json.dumps(settings.get('sortState', {})),
-            settings.get('isNumbersMasked', False),
-            settings.get('gmtOffset', 3),
-            json.dumps(settings.get('periodResets', {})),
-            settings.get('mainRefreshRate', 5),
-            settings.get('criticalMargin', 0),
-            settings.get('warningMargin', 500),
-            settings.get('isDarkMode', True),
-            settings.get('maskTimer', 'never'),
-            settings.get('fontSize', '14'),
+            json.dumps(settings.get('sort_state', {})),
+            settings.get('is_numbers_masked', False),
+            settings.get('gmt_offset', 3),
+            json.dumps(settings.get('period_resets', {})),
+            settings.get('main_refresh_rate', 5),
+            settings.get('critical_margin', 0),
+            settings.get('warning_margin', 500),
+            settings.get('is_dark_mode', True),
+            settings.get('mask_timer', 'never'),
+            settings.get('font_size', '14'),
             json.dumps(settings.get('notes', {})),
-            json.dumps(settings.get('brokerOffsets', {"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6})),
-            json.dumps(settings.get('alertThresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
-            settings.get('alertsEnabled', True),
-            settings.get('defaultSettingsTimestamp'),
-            settings.get('accountTimeout', 300),
-            json.dumps(settings.get('focusGroup', []))
+            json.dumps(settings.get('broker_offsets', {"Raw Trading Ltd": 3, "Swissquote": 5, "XTB International": -6})),
+            json.dumps(settings.get('alert_thresholds', {"equity": 500, "profit_loss": -1000, "margin_percent": 20, "open_trades": 50})),
+            settings.get('alerts_enabled', True),
+            settings.get('default_settings_timestamp'),
+            settings.get('account_timeout', 300),
+            json.dumps(settings.get('focus_group', []))
         ))
         conn.commit()
         cur.close()
@@ -713,7 +719,8 @@ def emit_account_updates():
             return
         cur = conn.cursor()
         cur.execute("SELECT account_timeout FROM settings WHERE user_id = 'default';")
-        timeout = cur.fetchone()[0] or 300
+        result = cur.fetchone()
+        timeout = result[0] if result else 300
         cur.execute("""
             SELECT * FROM accounts 
             WHERE last_update >= NOW() - INTERVAL '%s seconds';
